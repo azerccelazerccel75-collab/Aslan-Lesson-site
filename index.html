@@ -1108,8 +1108,8 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:21px;padding:0 
       <span class="logo-text"><b>Aslan Lessons</b><small>Dərs qeydiyyatı sistemi</small></span>
     </a>
     <div class="brand-copy">
-      <h1>Hər keçirilən dərs — bir nöqtə.</h1>
-      <p>Müəllim dərsdən sonra qeyd edir, administrasiya gedişatı izləyir. Ay tamamlananda sistem özü xəbər verir.</p>
+      <h1>Bütün dərslər - bir yerdə.</h1>
+      <p>Müəllim dərsdən sonra qeyd edir, kurs rəhbəri gedişatı izləyir. Ay tamamlananda sistem özü xəbər verir.</p>
     </div>
     <div class="demo-month" aria-hidden="true">
       <div class="pips" id="demoPips"></div>
@@ -1136,7 +1136,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:21px;padding:0 
           <span>Login</span>
           <span class="input-wrap">
             <svg class="i lead" viewBox="0 0 24 24" data-icon="user"></svg>
-            <input class="input has-lead" id="lgLogin" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="məsələn: aysel.m" required>
+            <input class="input has-lead" id="lgLogin" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Login" required>
           </span>
         </label>
         <label class="field">
@@ -1149,7 +1149,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:21px;padding:0 
         </label>
         <div class="caps" id="capsHint" hidden><svg class="i" viewBox="0 0 24 24" data-icon="alert"></svg>Caps Lock aktivdir</div>
         <button class="btn btn-primary btn-lg btn-block" type="submit" id="loginBtn">Daxil ol</button>
-        <p class="hint">Şifrənizi unutmusunuzsa, administratora müraciət edin.</p>
+        <p class="hint">Şifrənizi unutmusunuzsa, kurs rəhbərinə müraciət edin.</p>
         <button class="install-link" type="button" data-act="installApp" id="loginInstall" hidden><svg class="i" viewBox="0 0 24 24" data-icon="home"></svg>Ana ekrana əlavə et</button>
       </form>
     </div>
@@ -1651,7 +1651,7 @@ async function logout(){
 /* ===================== ROUTING ===================== */
 function toolsAllowed(){ const f = S.d && S.d.flags; return !!(f && (f.tools || f.survey || f.announce)); }
 const PAGES = {
-  home:     { title: 'İcmal', icon: 'home', nav: true, allow: () => isAdminish() },
+  home:     { title: 'Əsas', icon: 'home', nav: true, allow: () => isAdminish() },
   mine:     { title: 'Məşğələlərim', icon: 'book', nav: true, allow: () => isTeacherish() },
   courses:  { title: 'Məşğələlər', icon: 'layers', nav: true, allow: () => can('courses.view') },
   students: { title: 'Tələbələr', icon: 'users', nav: true, allow: () => can('students.view') },
@@ -2248,7 +2248,7 @@ function coursePaid(c){
   return { paid: c.studentIds.length - unpaid, total: c.studentIds.length };
 }
 
-/* ---------- HOME (İcmal) ---------- */
+/* ---------- HOME (Əsas) ---------- */
 function quickActions(){
   if (ro()) return [];
   const qa = [];
@@ -2638,10 +2638,10 @@ const SITE_TIPS = [
   'Uzun elanı «Ətraflı» düyməsi ilə tam oxuya bilərsiniz.'
 ];
 const SLOW_MSGS = [
-  'İnternetiniz zəif görünür. Bağlantınızı yoxlayın…',
-  'Bağlantı yavaşdır, bir az da gözləyin…',
-  'Hələ də yüklənir — şəbəkəni yoxlamağa dəyər.',
-  'Zəif internet. Wi-Fi və ya mobil şəbəkəni yoxlayın.'
+  'Deyəsən internetiniz zəifdir. Bağlantınızı yoxlayın…',
+  'Bağlantı zəifdir, bir az da gözləyin…',
+  'Hələ də yüklənir😔😔😔',
+  'İnternetiniz çooooooox zəifdir. Wi-Fi və ya mobil şəbəkəni yoxlayın.'
 ];
 /**
  * Mərhələli yükləyici:
@@ -3101,7 +3101,7 @@ RENDER.perms = () => {
   const list = users.filter(u => !q || fold(u.name + ' ' + (u.login || '')).includes(q)).sort((a, b) => a.name.localeCompare(b.name, 'az'));
   const sel = S.ui.psel && S.uMap[S.ui.psel] && S.uMap[S.ui.psel].role !== 'superadmin' ? S.uMap[S.ui.psel] : null;
   if (sel && (!S.ui.pdraft || S.ui.pdraftFor !== sel.id)){ S.ui.pdraft = new Set(sel.permissions || []); S.ui.pdraftFor = sel.id; }
-  return `<div class="page-head"><div><h2>İcazələr</h2><p>İstifadəçini seçin və ona baş adminin hansı funksiyalarını verəcəyinizi qeyd edin.</p></div></div>
+  return `<div class="page-head"><div><h2>İcazələr</h2><p>İstifadəçini seçin və ona sizin hansı funksiyalarını verəcəyinizi qeyd edin.</p></div></div>
   ${users.length ? `<div class="perm-layout">
     <aside class="perm-users">
       <div class="input-wrap">${ic('search','lead')}<input class="input has-lead" id="pq" placeholder="İstifadəçi axtar" value="${esc(S.ui.pq || '')}"></div>
