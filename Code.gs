@@ -10,15 +10,17 @@
  *  3) Redaktorda setup() funksiyasını bir dəfə işə salın.
  *  4) Yerləşdir → Veb tətbiq → «İcra edən: Mən», «Giriş: Hər kəs». URL-i index.html-də API_URL-ə yazın.
  *  5) Triggerlər setup() zamanı avtomatik qurulur:
- *     purgeTrashDaily (hər gün — zibil qutusu), autoArchiveQuarterly (hər ay yoxlayır, 3 aydan bir arxivləşdirir).
- *  Kodu yenilədikdən sonra setup()-ı bir dəfə yenidən işə salın (yeni icazələr və triggerlər üçün).
+ *     purgeTrashDaily (hər gün — zibil qutusu, vaxtı bitmiş imtahan cəhdləri), autoArchiveQuarterly (hər ay yoxlayır, 3 aydan bir arxivləşdirir).
+ *  Kodu yenilədikdən sonra setup()-ı bir dəfə yenidən işə salın (yeni vərəqlər, sütunlar, icazələr və triggerlər üçün).
+ *  setup() heç bir məlumatı silmir: yalnız çatışmayan vərəqləri yaradır və çatışmayan sütunları sonuna əlavə edir.
  */
 
 // ===================== AYARLAR =====================
 const SPREADSHEET_URL = '';            // məsələn: 'https://docs.google.com/spreadsheets/d/XXXX/edit'
 const TIMEZONE = 'Asia/Baku';
 const TZ_OFFSET = '+04:00';
-const MAIN_ADMIN = { name: 'Baş admin', login: 'admin', password: 'admin123' };
+const MAIN_ADMIN = { name: 'Leyla xanım', login: 'admin', password: 'admin123' };
+const OLD_ADMIN_NAME = 'Baş admin';  // köhnə versiyanın ilkin adı — setup() onu avtomatik «Leyla xanım» edir
 const DEVELOPER   = { name: 'Developer', login: 'developer', password: 'dev12345' };
 const SESSION_SECONDS = 6 * 60 * 60;
 const EDIT_WINDOW_HOURS = 24;
@@ -38,11 +40,22 @@ const ARCHIVE_NOTES = {
   Surveys: 'Arxivlənən cavablar sorğu statistikasından çıxır. Açıq linklərə toxunulmur.',
   Anns: 'Yalnız söndürülmüş elanlar. Aktiv elanlara toxunulmur.'
 };
-const ARCHIVE_LOCKED = ['Dərslər', 'Tələbələr', 'Müəllimlər', 'Məşğələlər', 'Ödənişlər', 'Köçürmələr (tələbə tarixçəsi)'];
+const ARCHIVE_LOCKED = ['Dərslər', 'Tələbələr', 'Müəllimlər', 'Məşğələlər', 'Ödənişlər', 'Köçürmələr (tələbə tarixçəsi)', 'İmtahanlar və nəticələri'];
 const AUTO_ARCHIVE_SHEETS = ['Logs', 'Notifs']; // avto-arxiv yalnız bunları daşıyır
 const STALE_DAYS = 14;                  // «Diqqət»: neçə gün dərs qeyd olunmayan məşğələ xəbərdarlıq alır
 // Test məlumatları generatoru (yalnız developer) — bir dəfədə maksimum say
 const TEST_LIMITS = { teachers: 20, students: 200, courses: 60, lessons: 12 };
+// İmtahanlar
+const EXAM_GRACE_SEC = 45;              // şəbəkə gecikməsi üçün güzəşt (vaxt bitəndən sonra cavabın qəbul olunduğu müddət)
+const EXAM_MAX_Q = 150;                 // bir imtahanda maksimum sual
+const EXAM_MAX_STUDENTS = 300;          // bir imtahana təyin edilən maksimum tələbə
+const EXAM_MAX_ATTEMPTS = 30;           // bir tələbənin bir imtahana maksimum cəhd sayı (sui-istifadəyə qarşı)
+const EXAM_WARN_LIMIT = 3;              // xəbərdarlıq hüququ: növbəti pozuntuda imtahan bitir
+const EXAM_PERSIST_SEC = 120;           // qaralama cavablar cədvələ neçə saniyədən bir yazılır (arada keşdə saxlanılır)
+const EXAM_CHUNK = 45000;               // bir xanaya yazılan maksimum simvol (Google limiti 50 000)
+// Toplu idxal
+const IMPORT_PASSWORD = '12345';        // idxal olunan müəllimlərin ilkin şifrəsi (ilk girişdə dəyişdirilir)
+const IMPORT_LIMITS = { teachers: 200, students: 3000, courses: 1500, chars: 200000 };
 // Avtomatik qurulan triggerlər
 const TRIGGERS = [
   { fn: 'purgeTrashDaily', label: 'Zibil qutusunun təmizlənməsi (hər gün)', make: function (b) { return b.timeBased().everyDays(1).atHour(4); } },
@@ -51,7 +64,7 @@ const TRIGGERS = [
 
 // ===================== STRUKTUR =====================
 const SCHEMA = {
-  Users:    ['id', 'name', 'login', 'password', 'role', 'phone', 'permissions', 'theme', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'installHint', 'newsSeenAt', 'isTest'],
+  Users:    ['id', 'name', 'login', 'password', 'role', 'phone', 'permissions', 'theme', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'installHint', 'newsSeenAt', 'isTest', 'mustChange', 'subject'],
   Students: ['id', 'name', 'phone', 'parentName', 'parentPhone', 'note', 'cardToken', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'isTest'],
   Courses:  ['id', 'title', 'type', 'teacherId', 'studentIds', 'lessonsPerMonth', 'monthNo', 'monthStart', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'isTest'],
   Lessons:  ['id', 'lessonId', 'courseId', 'monthNo', 'date', 'studentId', 'status', 'reason', 'topic', 'markedBy', 'markedAt', 'editedBy', 'editedAt'],
@@ -63,12 +76,25 @@ const SCHEMA = {
   Surveys:  ['id', 'token', 'studentId', 'courseId', 'teacherId', 'monthNo', 'status', 'qVersion', 'questions', 'answers', 'sentBy', 'sentAt', 'answeredAt', 'adminStatus', 'adminNote', 'lowFlag'],
   Changelog:['id', 'title', 'body', 'kind', 'createdBy', 'createdAt'],
   Settings: ['key', 'value', 'updatedAt'],
-  Logs:     ['id', 'time', 'userId', 'userName', 'role', 'type', 'action', 'details']
+  Logs:     ['id', 'time', 'userId', 'userName', 'role', 'type', 'action', 'details'],
+  // İmtahan — şablon (suallar bir dəfə saxlanılır). «questions*» sütunları ağırdır və siyahılarda oxunmur.
+  Exams:    ['id', 'token', 'title', 'subject', 'note', 'teacherId', 'studentIds', 'keys', 'duration', 'points', 'passMin', 'maxPoints', 'qCount', 'openCount',
+             'strict', 'stopOnLimit', 'shuffle', 'reveal', 'active', 'locked', 'createdBy', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'isTest',
+             'questions', 'questions2', 'questions3'],
+  // Hər cəhd — bir sətir. İlk 4 sütunun sırası dəyişməməlidir (sürətli axtarış indeksi).
+  ExamResults: ['id', 'examId', 'status', 'studentId', 'startedAt', 'dur', 'deadline', 'finishedAt', 'spent', 'autoScore', 'openScore', 'score', 'maxPoints', 'passMin',
+             'openPending', 'violations', 'endReason', 'late', 'marks', 'gradedBy', 'gradedAt', 'savedAt',
+             'comment', 'conf', 'vlog', 'grades', 'answers', 'answers2', 'answers3']
+};
+// Ağır sütunlar: siyahı oxunuşlarında buraxılır, yalnız bir sətir açılanda oxunur.
+const HEAVY = {
+  Exams: ['questions', 'questions2', 'questions3'],
+  ExamResults: ['comment', 'conf', 'vlog', 'grades', 'answers', 'answers2', 'answers3']
 };
 
-const SOFT = { Users: true, Students: true, Courses: true }; // zibil qutusu olan vərəqlər
+const SOFT = { Users: true, Students: true, Courses: true, Exams: true }; // zibil qutusu olan vərəqlər
 
-const ROLE_LABELS = { superadmin: 'Baş admin', teacher: 'Müəllim', helper: 'Köməkçi', developer: 'Developer' };
+const ROLE_LABELS = { superadmin: 'Kurs rəhbəri', teacher: 'Müəllim', helper: 'Köməkçi', developer: 'Developer', student: 'Tələbə' };
 const TYPE_LABELS = { individual: 'Fərdi', group: 'Qrup' };
 const HELD = 'keçdi';
 const ABSENT = 'qayıb';
@@ -113,10 +139,16 @@ const PERMISSIONS = [
   { group: 'Elanlar', items: [
     { key: 'announce.send', label: 'Elan göndər' }
   ]},
+  { group: 'İmtahanlar', items: [
+    { key: 'exams.view', label: 'Bütün imtahanlara və nəticələrə bax' },
+    { key: 'exams.manage', label: 'İstənilən imtahanı yarat, redaktə et və yoxla' },
+    { key: 'exams.delete', label: 'İmtahanı və nəticələri sil' }
+  ]},
   { group: 'Alətlər', items: [
     { key: 'tools.trash', label: 'Zibil qutusu (bərpa/sil)' },
     { key: 'tools.bulk', label: 'Toplu əməliyyatlar (müəllim dəyişmə, köçürmə)' },
-    { key: 'tools.datacheck', label: 'Məlumatların yoxlanışı' }
+    { key: 'tools.datacheck', label: 'Məlumatların yoxlanışı' },
+    { key: 'tools.import', label: 'Toplu idxal (siyahıdan müəllim, tələbə və məşğələ)' }
   ]},
   { group: 'Jurnal', items: [
     { key: 'logs.view', label: 'Jurnala bax' }
@@ -135,7 +167,9 @@ const IMPLIED = {
   'attendance.edit': ['attendance.view', 'courses.view'], 'attendance.delete': ['attendance.view', 'courses.view'],
   'payments.view': ['students.view'], 'payments.add': ['payments.view', 'students.view'], 'payments.delete': ['payments.view', 'students.view'],
   'survey.send': ['students.view'], 'survey.view': ['students.view'],
-  'tools.bulk': ['courses.view']
+  'tools.bulk': ['courses.view'],
+  'tools.import': ['students.view', 'teachers.view', 'courses.view'],
+  'exams.manage': ['exams.view'], 'exams.delete': ['exams.view']
 };
 
 const STUDENT_FIELDS = { name: 'Ad Soyad', phone: 'Telefon', parentName: 'Valideyn', parentPhone: 'Valideynin telefonu', note: 'Qeyd' };
@@ -183,8 +217,20 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-// Girişsiz (public) əməliyyatlar — valideyn linkləri
-var PUBLIC = { publicCard: 1, publicSurveyInfo: 1, submitSurvey: 1, maintenanceStatus: 1 };
+// Girişsiz (public) əməliyyatlar — valideyn linkləri və tələbənin imtahan səhifəsi.
+// lock: false — əməliyyat yalnız oxuyur və ya kilidi özü (lazım olan hissədə) götürür.
+var PUBLIC = {
+  maintenanceStatus: { fn: function () { return { maintenance: maint_() }; }, lock: false },
+  publicCard:        { fn: function (req) { return publicCard_(req); }, lock: true },
+  publicSurveyInfo:  { fn: function (req) { return publicSurveyInfo_(req); }, lock: true },
+  submitSurvey:      { fn: function (req) { return submitSurvey_(req); }, lock: true },
+  xInfo:             { fn: function (req) { return xInfo_(req); }, lock: false },
+  xStart:            { fn: function (req) { return xStart_(req); }, lock: true },
+  xSave:             { fn: function (req) { return xSave_(req); }, lock: false },
+  xEvent:            { fn: function (req) { return xEvent_(req); }, lock: true },
+  xSubmit:           { fn: function (req) { return xSubmit_(req); }, lock: true },
+  xResult:           { fn: function (req) { return xResult_(req); }, lock: false }
+};
 
 const ROUTES = {
   bootstrap:      { fn: function () { return {}; }, data: true },
@@ -265,21 +311,33 @@ const ROUTES = {
   installTriggers:{ fn: installTriggersRoute_, lock: true },
   testDataInfo:   { fn: testDataInfo_ },
   genTestData:    { fn: genTestData_, lock: true },
-  purgeTestData:  { fn: purgeTestData_, lock: true }
+  purgeTestData:  { fn: purgeTestData_, lock: true },
+
+  // Toplu idxal
+  importRun:      { fn: importRun_, lock: true },
+
+  // İmtahanlar
+  examList:       { fn: examList_ },
+  examGet:        { fn: examGet_, lock: true },
+  saveExam:       { fn: saveExam_, lock: true, data: true },
+  setExamActive:  { fn: setExamActive_, lock: true },
+  copyExam:       { fn: copyExam_, lock: true },
+  deleteExam:     { fn: deleteExam_, lock: true, data: true },
+  examNewLinks:   { fn: examNewLinks_, lock: true },
+  examAttempt:    { fn: examAttempt_, lock: true },
+  gradeAttempt:   { fn: gradeAttempt_, lock: true, data: true },
+  deleteAttempt:  { fn: deleteAttempt_, lock: true, data: true }
 };
 
 function handle_(req) {
   var action = String(req.action || '');
+  req._at = Date.now();   // sorğunun serverə çatdığı an (kilid gözləməsindən əvvəl) — imtahan vaxtı bununla hesablanır
 
-  // Public (girişsiz) əməliyyatlar — valideyn linkləri texniki iş zamanı da işləyir
-  if (PUBLIC[action]) {
-    if (action === 'maintenanceStatus') return { ok: true, maintenance: maint_() };
-    return withLock_(function () {
-      var fn = { publicCard: publicCard_, publicSurveyInfo: publicSurveyInfo_, submitSurvey: submitSurvey_ }[action];
-      var res = fn(req) || {};
-      res.ok = true;
-      return res;
-    });
+  // Public (girişsiz) əməliyyatlar — valideyn linkləri və imtahan səhifəsi texniki iş zamanı da işləyir
+  if (PUBLIC.hasOwnProperty(action)) {
+    var pub = PUBLIC[action];
+    var runPub = function () { var res = pub.fn(req) || {}; res.ok = true; return res; };
+    return pub.lock ? withLock_(runPub) : runPub();
   }
 
   if (action === 'login') return withLock_(function () { return login_(req); });
@@ -292,6 +350,12 @@ function handle_(req) {
   if (maintOn_() && user.role !== 'developer' && action !== 'logout') {
     return { ok: false, code: 'MAINT', error: 'Sistemdə texniki işlər aparılır.', maintenance: maint_(),
       me: { id: user.id, name: user.name, role: user.role, theme: user.theme === 'dark' ? 'dark' : 'light' } };
+  }
+
+  // İlk giriş: şifrə dəyişdirilməyincə heç bir əməliyyat işləmir (hesaba bağlıdır — cihazdan asılı deyil)
+  if (isTrue_(user.mustChange) && action !== 'changePassword' && action !== 'logout' && action !== 'setTheme') {
+    return { ok: false, code: 'PWD', error: 'Davam etmək üçün əvvəlcə şifrənizi dəyişin.',
+      me: { id: user.id, name: user.name, login: user.login, role: user.role, theme: user.theme === 'dark' ? 'dark' : 'light' } };
   }
 
   var run = function () {
@@ -345,8 +409,12 @@ function setup() {
       id: newId_('U'), name: MAIN_ADMIN.name, login: MAIN_ADMIN.login, password: MAIN_ADMIN.password,
       role: 'superadmin', phone: '', permissions: '', theme: 'light', createdAt: now_(), updatedAt: '', deletedAt: '', deletedBy: ''
     }]);
-    log_(null, 'system', 'Sistem quruldu', 'Baş admin yaradıldı. Login: ' + MAIN_ADMIN.login);
-    Logger.log('Baş admin yaradıldı. Login: ' + MAIN_ADMIN.login + ' | Şifrə: ' + MAIN_ADMIN.password);
+    log_(null, 'system', 'Sistem quruldu', 'Əsas hesab yaradıldı. Login: ' + MAIN_ADMIN.login);
+    Logger.log('Əsas hesab yaradıldı. Login: ' + MAIN_ADMIN.login + ' | Şifrə: ' + MAIN_ADMIN.password);
+  } else if (main.name === OLD_ADMIN_NAME) {
+    // köhnə versiyadan qalan ilkin ad — saytda «admin» sözü görünməsin
+    update_('Users', main, { name: MAIN_ADMIN.name, updatedAt: now_() });
+    log_(null, 'system', 'Sistem yeniləndi', 'Əsas hesabın adı «' + OLD_ADMIN_NAME + '» → «' + MAIN_ADMIN.name + '» edildi.');
   }
   var dev = rawRows_('Users').filter(function (u) { return u.role === 'developer'; })[0];
   if (!dev) {
@@ -390,9 +458,12 @@ function triggersStatus_() {
 /** Trigger üçün: köhnə zibili təmizləyir. */
 function purgeTrashDaily() {
   withLock_(function () {
+    try { examCloseExpired_(null); } catch (e) { console.error(e); }   // vaxtı bitmiş, bağlanmamış imtahan cəhdləri
     Object.keys(SOFT).forEach(function (name) {
       var old = trashRows_(name).filter(function (r) { return ageHours_(r.deletedAt) > TRASH_DAYS * 24; });
-      if (old.length) removeRows_(name, old.map(function (r) { return r._row; }));
+      if (!old.length) return;
+      if (name === 'Exams') examPurgeResults_(old.map(function (r) { return r.id; }));   // imtahanla birlikdə nəticələri də silinir
+      removeRows_(name, old.map(function (r) { return r._row; }));
     });
     SpreadsheetApp.flush();
   });
@@ -412,7 +483,10 @@ function meta_(name) {
   if (_meta[name]) return _meta[name];
   var ss = ss_();
   var sh = ss.getSheetByName(name);
-  if (!sh) sh = ss.insertSheet(name);
+  if (!sh) {
+    // iki sorğu eyni anda yeni vərəq yaratmağa çalışsa, ikincisi sadəcə mövcud olanı götürür
+    try { sh = ss.insertSheet(name); } catch (e) { sh = ss.getSheetByName(name); if (!sh) throw e; }
+  }
   var lastCol = Math.max(sh.getLastColumn(), 1);
   var head = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h).trim(); });
   while (head.length && head[head.length - 1] === '') head.pop();
@@ -433,16 +507,63 @@ function rawRows_(name) {
   var last = m.sh.getLastRow();
   var out = [];
   if (last >= 2) {
-    var vals = m.sh.getRange(2, 1, last - 1, m.head.length).getValues();
+    var heavy = HEAVY[name] || null;
+    var vals, cols = [];
+    if (!heavy) {
+      vals = m.sh.getRange(2, 1, last - 1, m.head.length).getValues();
+      for (var j = 0; j < m.head.length; j++) cols.push(j);
+    } else {
+      // Ağır sütunlar (sual və cavab mətnləri) oxunmur: yalnız yüngül sütunların ardıcıl blokları götürülür.
+      var blocks = [];
+      for (var c = 0; c < m.head.length; c++) {
+        if (!m.head[c] || heavy.indexOf(m.head[c]) !== -1) continue;
+        var b = blocks[blocks.length - 1];
+        if (b && b[0] + b[1] === c) b[1]++; else blocks.push([c, 1]);
+        cols.push(c);
+      }
+      var parts = blocks.map(function (bl) { return m.sh.getRange(2, bl[0] + 1, last - 1, bl[1]).getValues(); });
+      vals = [];
+      for (var r = 0; r < last - 1; r++) {
+        var line = [];
+        for (var k = 0; k < parts.length; k++) for (var x = 0; x < blocks[k][1]; x++) line[blocks[k][0] + x] = parts[k][r][x];
+        vals.push(line);
+      }
+    }
+    var keyCol = m.head[0];
     for (var i = 0; i < vals.length; i++) {
       var o = { _row: i + 2 };
-      for (var j = 0; j < m.head.length; j++) if (m.head[j]) o[m.head[j]] = cell_(vals[i][j]);
-      var keyCol = m.head[0];
+      if (heavy) o._light = true;   // natamam sətir: update_ onu bütöv yazmır, yalnız dəyişən xanaları yazır
+      for (var q = 0; q < cols.length; q++) { var h = m.head[cols[q]]; if (h) o[h] = cell_(vals[i][cols[q]]); }
       if (o[keyCol] !== '' && o[keyCol] != null) out.push(o);
     }
   }
   _raw[name] = out;
   return out;
+}
+
+// Bir sətrin bütün sütunları (ağır sütunlar daxil)
+function fullRowAt_(name, rowNum) {
+  var m = meta_(name);
+  var v = m.sh.getRange(rowNum, 1, 1, m.head.length).getValues()[0];
+  var o = { _row: rowNum };
+  for (var j = 0; j < m.head.length; j++) if (m.head[j]) o[m.head[j]] = cell_(v[j]);
+  return o;
+}
+
+// Yalnız göstərilən xanaları yazır (yanaşı sütunlar bir əməliyyatla)
+function setCells_(name, rowNum, changes) {
+  var m = meta_(name);
+  var idx = Object.keys(changes).map(function (k) { return m.head.indexOf(k); })
+    .filter(function (i) { return i !== -1; }).sort(function (a, b) { return a - b; });
+  var i = 0;
+  while (i < idx.length) {
+    var start = idx[i], n = 1;
+    while (i + n < idx.length && idx[i + n] === start + n) n++;
+    var vals = [];
+    for (var k = 0; k < n; k++) vals.push(val_(changes[m.head[start + k]]));
+    m.sh.getRange(rowNum, start + 1, 1, n).setValues([vals]);
+    i += n;
+  }
 }
 
 // Aktiv (silinməmiş) sətirlər
@@ -463,12 +584,13 @@ function insertMany_(name, objs) {
   var need = start + data.length - 1 - m.sh.getMaxRows();
   if (need > 0) m.sh.insertRowsAfter(m.sh.getMaxRows(), need + 20);
   m.sh.getRange(start, 1, data.length, m.head.length).setValues(data);
-  delete _raw[name];
+  delete _raw[name]; delete _raw[name + '#idx'];
 }
 
 function update_(name, rowObj, changes) {
   var m = meta_(name);
   Object.keys(changes).forEach(function (k) { rowObj[k] = changes[k]; });
+  if (rowObj._light) { setCells_(name, rowObj._row, changes); return; }   // natamam oxunmuş sətir — yalnız dəyişən xanalar
   m.sh.getRange(rowObj._row, 1, 1, m.head.length).setValues([m.head.map(function (h) { return val_(rowObj[h]); })]);
 }
 
@@ -484,7 +606,7 @@ function removeRows_(name, nums) {
     m.sh.deleteRows(start - count + 1, count);
     i += count;
   }
-  delete _raw[name];
+  delete _raw[name]; delete _raw[name + '#idx'];
 }
 
 function cell_(v) {
@@ -644,7 +766,7 @@ function auth_(token) {
   var uid = cache.get('s_' + token);
   if (!uid) throw fail_('Sessiyanın vaxtı bitib. Yenidən daxil olun.', 'AUTH');
   var u = findUser_(uid);
-  if (!u) { cache.remove('s_' + token); throw fail_('Hesabınız tapılmadı. Administratorla əlaqə saxlayın.', 'AUTH'); }
+  if (!u) { cache.remove('s_' + token); throw fail_('Hesabınız tapılmadı. Leyla xanımla əlaqə saxlayın.', 'AUTH'); }
   cache.put('s_' + token, uid, SESSION_SECONDS);
   u._token = token;
   return u;
@@ -675,6 +797,12 @@ function login_(req) {
     log_(u, 'auth', 'Sistemə daxil oldu', 'Login: ' + u.login + ' · texniki iş rejimində');
     return { ok: true, token: token, maintenance: maint_(),
       me: { id: u.id, name: u.name, role: u.role, theme: u.theme === 'dark' ? 'dark' : 'light' } };
+  }
+  // İlk giriş: şifrə dəyişdirilməyincə məlumat verilmir (hesaba bağlıdır — hər girişdə və ya hər cihazda yox, yalnız bir dəfə)
+  if (isTrue_(u.mustChange)) {
+    log_(u, 'auth', 'Sistemə daxil oldu', 'Login: ' + u.login + ' · ilk giriş, şifrə dəyişdirilməlidir');
+    return { ok: true, token: token, mustChange: true,
+      me: { id: u.id, name: u.name, login: u.login, role: u.role, theme: u.theme === 'dark' ? 'dark' : 'light' } };
   }
   log_(u, 'auth', 'Sistemə daxil oldu', 'Login: ' + u.login);
   return { ok: true, token: token, data: bootstrap_(u, req) };
@@ -708,9 +836,12 @@ function changePassword_(u, req) {
   var np = String(req.newPassword || '');
   if (np.length < 4 || np.length > 50) throw fail_('Yeni şifrə 4–50 simvol olmalıdır.');
   if (/\s/.test(np)) throw fail_('Şifrədə boşluq olmamalıdır.');
-  update_('Users', u, { password: np, updatedAt: now_() });
-  log_(u, 'profile', 'Öz şifrəsini dəyişdi', '');
-  return {};
+  if (np === String(u.password)) throw fail_('Yeni şifrə hazırkı şifrədən fərqli olmalıdır.');
+  var forced = isTrue_(u.mustChange);
+  if (forced && lower_(np) === lower_(u.login)) throw fail_('Şifrə loginlə eyni ola bilməz.');
+  update_('Users', u, { password: np, mustChange: '', updatedAt: now_() });
+  log_(u, 'profile', forced ? 'İlk girişdə şifrəsini dəyişdi' : 'Öz şifrəsini dəyişdi', '');
+  return { changed: true };
 }
 
 // ===================== BOOTSTRAP =====================
@@ -735,7 +866,7 @@ function bootstrap_(u, req) {
 
   var base = {
     me: {
-      id: u.id, name: u.name, login: u.login, role: u.role,
+      id: u.id, name: u.name, login: u.login, role: u.role, subject: u.subject || '',
       phone: u.phone, theme: (viewAs ? real : u).theme === 'dark' ? 'dark' : 'light',
       perms: P, isSuper: isSuper, isDev: isDev,
       readOnly: readOnly,
@@ -792,7 +923,8 @@ function bootstrap_(u, req) {
     var o = { id: x.id, name: x.name, role: x.role };
     var hide = (x.role === 'superadmin' || x.role === 'developer') && !isSuper;
     if (x.role === 'developer' && !isSuper) return null; // developer yalnız baş adminə görünür
-    if (has('teachers.view') && !hide) { o.login = x.login; o.phone = x.phone; o.createdAt = x.createdAt; }
+    if (x.subject) o.subject = x.subject;
+    if (has('teachers.view') && !hide) { o.login = x.login; o.phone = x.phone; o.createdAt = x.createdAt; if (isTrue_(x.mustChange)) o.mustChange = true; }
     if (isSuper && x.role !== 'superadmin' && x.role !== 'developer') o.permissions = permsOf_(x);
     if (isTrue_(x.isTest)) o.isTest = true;
     return o;
@@ -829,7 +961,14 @@ function bootstrap_(u, req) {
 
   // Sorğu xəbərdarlığı (göndərilə biləcək)
   base.flags = { announce: has('announce.send'), survey: has('survey.view') || has('survey.send') || has('survey.edit'),
-    tools: has('tools.trash') || has('tools.bulk') || has('tools.datacheck') };
+    tools: has('tools.trash') || has('tools.bulk') || has('tools.datacheck') || has('tools.import'), imp: has('tools.import') };
+
+  // İmtahanlar: müəllim öz imtahanlarını görür; icazəsi olan — hamısını. pending — yoxlanılmağı gözləyən açıq cavablar.
+  var teaches = u.role === 'teacher' || courses.some(function (c) { return c.teacherId === u.id; });
+  base.exam = { all: has('exams.view'), manage: has('exams.manage'), del: has('exams.delete'),
+    create: teaches || has('exams.manage'), warnLimit: EXAM_WARN_LIMIT, maxQ: EXAM_MAX_Q, pending: 0 };
+  base.exam.show = base.exam.create || base.exam.all;
+  if (base.exam.show) { try { base.exam.pending = examPending_(u); } catch (e) { base.exam.pending = 0; } }
 
   return base;
 }
@@ -1108,7 +1247,8 @@ function buildCard_(s, u, forPublic) {
     },
     monthly: monthlySeries_(history),
     transfers: forPublic ? [] : transfersOf_(s.id, sMap, uMap),
-    payments: payments, paymentsTotal: Math.round(total * 100) / 100
+    payments: payments, paymentsTotal: Math.round(total * 100) / 100,
+    exams: examsOfStudent_(s.id, uMap)
   };
 }
 
@@ -1149,6 +1289,7 @@ function userPayload_(req, isNew, target) {
     p.password = pw;
   }
   p.phone = phone_(req.phone, 'Telefon');
+  if (req.subject !== undefined) p.subject = str_(req.subject, 60);
   return p;
 }
 
@@ -1158,9 +1299,10 @@ function addUser_(u, req) {
   var p = userPayload_(req, true, null);
   var row = { id: newId_('U'), role: role, permissions: '', theme: 'light', createdAt: now_(), updatedAt: '', deletedAt: '', deletedBy: '' };
   Object.keys(p).forEach(function (k) { row[k] = p[k]; });
+  if (req.mustChange) row.mustChange = 'true';   // ilk girişdə şifrəni dəyişməlidir
   insertMany_('Users', [row]);
   log_(u, 'teacher', role === 'helper' ? 'Yeni köməkçi əlavə etdi' : 'Yeni müəllim əlavə etdi',
-    row.name + ' · Login: ' + row.login + (row.phone ? ' · Tel: ' + row.phone : ''));
+    row.name + ' · Login: ' + row.login + (row.subject ? ' · Fənn: ' + row.subject : '') + (row.phone ? ' · Tel: ' + row.phone : '') + (row.mustChange ? ' · ilk girişdə şifrə dəyişdirilməlidir' : ''));
   return { id: row.id };
 }
 
@@ -1181,10 +1323,16 @@ function editUser_(u, req) {
     }
   }
   var changes = [];
-  var d = diffText_(t, p, { name: 'Ad Soyad', login: 'Login', phone: 'Telefon' });
+  var d = diffText_(t, p, { name: 'Ad Soyad', login: 'Login', phone: 'Telefon', subject: 'Fənn' });
   if (d) changes.push(d);
   if (newRole !== t.role) changes.push('Rol: «' + ROLE_LABELS[t.role] + '» → «' + ROLE_LABELS[newRole] + '»');
   if (p.password && p.password !== t.password) changes.push('Şifrə dəyişdirildi');
+  // «İlk girişdə şifrəni dəyişsin» — yalnız müəllim/köməkçi hesabları üçün və yalnız başqası tərəfindən qoyulur
+  if (req.mustChange !== undefined && u.id !== t.id && (t.role === 'teacher' || t.role === 'helper')) {
+    var mc = req.mustChange ? 'true' : '';
+    if (mc !== (isTrue_(t.mustChange) ? 'true' : '')) changes.push(mc ? 'Növbəti girişdə şifrəni dəyişməlidir' : 'Şifrəni dəyişmə tələbi götürüldü');
+    p.mustChange = mc;
+  }
   var oldName = t.name;
   p.role = newRole;
   p.updatedAt = now_();
@@ -1197,7 +1345,7 @@ function editUser_(u, req) {
 function deleteUser_(u, req) {
   need_(u, 'teachers.delete');
   var t = mustUser_(req.id);
-  if (t.role === 'superadmin') throw fail_('Baş admini silmək olmaz.', 'PERM');
+  if (t.role === 'superadmin') throw fail_('Leyla xanımın hesabını silmək olmaz.', 'PERM');
   if (t.role === 'developer') throw fail_('Developer hesabını silmək olmaz.', 'PERM');
   if (t.id === u.id) throw fail_('Öz hesabınızı silə bilməzsiniz.');
   var cs = rows_('Courses').filter(function (c) { return c.teacherId === t.id; });
@@ -1357,7 +1505,7 @@ function markLesson_(u, req) {
   var N = Number(c.lessonsPerMonth) || 8;
   var m = Number(c.monthNo) || 1;
   var held = heldIn_(c.id, m, null);
-  if (held >= N) throw fail_('Bu ayın bütün dərsləri (' + N + '/' + N + ') artıq qeyd olunub. Tələbə davam edirsə, admin yeni ay başlatmalıdır.');
+  if (held >= N) throw fail_('Bu ayın bütün dərsləri (' + N + '/' + N + ') artıq qeyd olunub. Tələbə davam edirsə, Leyla xanım yeni ay başlatmalıdır.');
   var isHeld = entries.some(function (e) { return e.status === HELD; });
   var lessonId = newId_('D');
   var stamp = now_();
@@ -1387,7 +1535,7 @@ function canTouchLesson_(u, rows, permKey) {
 
 function editLesson_(u, req) {
   var rows = lessonRows_(req.lessonId);
-  if (!canTouchLesson_(u, rows, 'attendance.edit')) throw fail_('Qeydi düzəltmək üçün vaxt (' + EDIT_WINDOW_HOURS + ' saat) bitib. Düzəliş üçün adminə müraciət edin.', 'PERM');
+  if (!canTouchLesson_(u, rows, 'attendance.edit')) throw fail_('Qeydi düzəltmək üçün vaxt (' + EDIT_WINDOW_HOURS + ' saat) bitib. Düzəliş üçün Leyla xanıma müraciət edin.', 'PERM');
   var c = findCourse_(rows[0].courseId);
   if (!c) throw fail_('Bu qeydin aid olduğu məşğələ silinib.');
   var ids = rows.map(function (r) { return r.studentId; });
@@ -1411,20 +1559,20 @@ function editLesson_(u, req) {
   });
   var after = 'Tarix: ' + date + (topic ? ', Mövzu: ' + topic : '') + ', ' + entriesText_(entries);
   log_(u, 'lesson', 'Dərs qeydini düzəltdi', '«' + courseLabel_(c) + '» · Ay ' + m + ' · Əvvəl: [' + before + '] → Sonra: [' + after + ']');
-  if (markedBy && markedBy !== u.id) notify_([markedBy], 'lesson', 'Admin «' + courseLabel_(c) + '» üzrə sizin dərs qeydinizi düzəltdi (' + fmtD_(date) + ').', 'mine', '');
+  if (markedBy && markedBy !== u.id) notify_([markedBy], 'lesson', u.name + ' «' + courseLabel_(c) + '» üzrə sizin dərs qeydinizi düzəltdi (' + fmtD_(date) + ').', 'mine', '');
   return {};
 }
 
 function deleteLesson_(u, req) {
   var rows = lessonRows_(req.lessonId);
-  if (!canTouchLesson_(u, rows, 'attendance.delete')) throw fail_('Qeydi silmək üçün vaxt (' + EDIT_WINDOW_HOURS + ' saat) bitib. Silmək üçün adminə müraciət edin.', 'PERM');
+  if (!canTouchLesson_(u, rows, 'attendance.delete')) throw fail_('Qeydi silmək üçün vaxt (' + EDIT_WINDOW_HOURS + ' saat) bitib. Silmək üçün Leyla xanıma müraciət edin.', 'PERM');
   var c = findCourse_(rows[0].courseId);
   var markedBy = rows[0].markedBy;
   var desc = '«' + courseLabel_(c) + '» · Ay ' + rows[0].monthNo + ' · Tarix: ' + rows[0].date + ' · ' +
     entriesText_(rows.map(function (r) { return { studentId: r.studentId, status: r.status, reason: r.reason }; })) + ' · Qeyd edən: ' + userName_(markedBy);
   removeRows_('Lessons', rows.map(function (r) { return r._row; }));
   log_(u, 'lesson', 'Dərs qeydini sildi', desc);
-  if (markedBy && markedBy !== u.id) notify_([markedBy], 'lesson', 'Admin «' + courseLabel_(c) + '» üzrə sizin dərs qeydinizi sildi (' + fmtD_(rows[0].date) + ').', 'mine', '');
+  if (markedBy && markedBy !== u.id) notify_([markedBy], 'lesson', u.name + ' «' + courseLabel_(c) + '» üzrə sizin dərs qeydinizi sildi (' + fmtD_(rows[0].date) + ').', 'mine', '');
   return {};
 }
 function fmtD_(s) { return String(s || '').slice(0, 10); }
@@ -1553,7 +1701,7 @@ function getDevLog_(u, req) {
 
 // ===================== İCAZƏLƏR =====================
 function setPermissions_(u, req) {
-  if (u.role !== 'superadmin') throw fail_('«İcazələr» bölməsi yalnız baş admin üçündür.', 'PERM');
+  if (u.role !== 'superadmin') throw fail_('«İcazələr» bölməsi yalnız Leyla xanım üçündür.', 'PERM');
   var t = mustUser_(req.userId);
   if (t.role === 'superadmin' || t.role === 'developer') throw fail_('Bu hesabın icazələrini dəyişmək olmaz.');
   var wanted = (Array.isArray(req.permissions) ? req.permissions : []).map(String).filter(function (k) { return ALL_PERMS.indexOf(k) !== -1; });
@@ -1565,7 +1713,7 @@ function setPermissions_(u, req) {
   added.forEach(function (k) { log_(u, 'permission', 'İcazə verdi', '«' + t.name + '» istifadəçisinə «' + PERM_LABEL[k] + '» icazəsini verdi'); });
   removed.forEach(function (k) { log_(u, 'permission', 'İcazəni geri aldı', '«' + t.name + '» istifadəçisindən «' + PERM_LABEL[k] + '» icazəsini geri aldı'); });
   if (!added.length && !removed.length) log_(u, 'permission', 'İcazələri yadda saxladı', '«' + t.name + '» — dəyişiklik edilmədi');
-  if (added.length || removed.length) notify_([t.id], 'perm', 'İcazələriniz baş admin tərəfindən yeniləndi.', '', '');
+  if (added.length || removed.length) notify_([t.id], 'perm', 'İcazələriniz Leyla xanım tərəfindən yeniləndi.', '', '');
   return { added: added.length, removed: removed.length };
 }
 
@@ -1879,7 +2027,13 @@ function publicCard_(req) {
 function trashList_(u, req) {
   need_(u, 'tools.trash');
   var purgeHint = TRASH_DAYS;
-  var out = { students: [], users: [], courses: [], purgeDays: purgeHint };
+  var out = { students: [], users: [], courses: [], exams: [], purgeDays: purgeHint };
+  var resCount = {};
+  if (trashRows_('Exams').length) examIndex_().forEach(function (x) { resCount[x.examId] = (resCount[x.examId] || 0) + 1; });
+  trashRows_('Exams').forEach(function (e) {
+    out.exams.push({ id: e.id, title: e.title, teacherName: userName_(e.teacherId), attempts: resCount[e.id] || 0,
+      deletedAt: e.deletedAt, deletedBy: userName_(e.deletedBy), daysLeft: daysLeft_(e.deletedAt) });
+  });
   trashRows_('Students').forEach(function (s) {
     out.students.push({ id: s.id, name: s.name, phone: s.phone, deletedAt: s.deletedAt, deletedBy: userName_(s.deletedBy), daysLeft: daysLeft_(s.deletedAt) });
   });
@@ -1895,7 +2049,7 @@ function daysLeft_(deletedAt) { return Math.max(0, Math.ceil(TRASH_DAYS - ageHou
 
 function restoreItem_(u, req) {
   need_(u, 'tools.trash');
-  var kind = req.kind, sheet = { student: 'Students', user: 'Users', course: 'Courses' }[kind];
+  var kind = req.kind, sheet = { student: 'Students', user: 'Users', course: 'Courses', exam: 'Exams' }[kind];
   if (!sheet) throw fail_('Naməlum element.');
   var r = trashRows_(sheet).filter(function (x) { return x.id === String(req.id); })[0];
   if (!r) throw fail_('Element tapılmadı.');
@@ -1904,23 +2058,31 @@ function restoreItem_(u, req) {
     if (dup) throw fail_('«' + r.login + '» logini artıq istifadə olunur. Bərpadan əvvəl digərini dəyişin.');
   }
   update_(sheet, r, { deletedAt: '', deletedBy: '' });
-  var nm = sheet === 'Courses' ? courseLabel_(r) : r.name;
-  log_(u, 'trash', 'Zibildən bərpa etdi', (kind === 'student' ? 'Tələbə' : kind === 'user' ? 'İstifadəçi' : 'Məşğələ') + ': ' + nm);
+  var nm = sheet === 'Courses' ? courseLabel_(r) : (sheet === 'Exams' ? r.title : r.name);
+  log_(u, 'trash', 'Zibildən bərpa etdi', TRASH_KIND[kind] + ': ' + nm);
   return {};
 }
+var TRASH_KIND = { student: 'Tələbə', user: 'İstifadəçi', course: 'Məşğələ', exam: 'İmtahan' };
 function purgeItem_(u, req) {
   need_(u, 'tools.trash');
-  var kind = req.kind, sheet = { student: 'Students', user: 'Users', course: 'Courses' }[kind];
+  var kind = req.kind, sheet = { student: 'Students', user: 'Users', course: 'Courses', exam: 'Exams' }[kind];
   if (!sheet) throw fail_('Naməlum element.');
   var r = trashRows_(sheet).filter(function (x) { return x.id === String(req.id); })[0];
   if (!r) throw fail_('Element tapılmadı.');
-  var nm = sheet === 'Courses' ? courseLabel_(r) : r.name;
+  var nm = sheet === 'Courses' ? courseLabel_(r) : (sheet === 'Exams' ? r.title : r.name);
+  var extra = '';
   if (sheet === 'Courses') {
     var lr = rows_('Lessons').filter(function (l) { return l.courseId === r.id; });
     if (lr.length) removeRows_('Lessons', lr.map(function (l) { return l._row; }));
   }
+  if (sheet === 'Exams') {
+    need_(u, 'exams.delete');
+    var gone = examPurgeResults_([r.id]);
+    extra = ' · ' + gone + ' nəticə ilə birlikdə';
+    r = trashRows_('Exams').filter(function (x) { return x.id === String(req.id); })[0];   // sətir nömrəsi təzələnir
+  }
   removeRows_(sheet, [r._row]);
-  log_(u, 'trash', 'Həmişəlik sildi', (kind === 'student' ? 'Tələbə' : kind === 'user' ? 'İstifadəçi' : 'Məşğələ') + ': ' + nm);
+  log_(u, 'trash', 'Həmişəlik sildi', TRASH_KIND[kind] + ': ' + nm + extra);
   return {};
 }
 
@@ -1993,6 +2155,7 @@ function dataCheck_(u, req) {
   if (lessonOrphan) issues.push({ type: 'info', text: lessonOrphan + ' məşğələyə aid dərs qeydləri var, lakin məşğələ artıq aktiv deyil (silinib).' });
   var payOrphanS = payments.filter(function (p) { return !sIds[p.studentId]; }).length;
   if (payOrphanS) issues.push({ type: 'warn', text: payOrphanS + ' ödəniş silinmiş tələbəyə aiddir.' });
+  examCheck_(issues, sIds);
   var tc = testCounts_(testScope_());
   if (tc.teachers || tc.students || tc.courses) issues.push({ type: 'info', text: 'Sistemdə test məlumatları var: ' + tc.teachers + ' müəllim, ' + tc.students + ' tələbə, ' + tc.courses + ' məşğələ. Developer onları bir düymə ilə silə bilər.' });
 
@@ -2102,20 +2265,25 @@ function testScope_() {
   var surveys = rawRows_('Surveys').filter(function (s) { return tS[s.studentId] || tC[s.courseId] || tU[s.teacherId]; });
   var notifs = rawRows_('Notifs').filter(function (n) { return tU[n.userId]; });
   var annSeen = rawRows_('AnnSeen').filter(function (n) { return tU[n.userId]; });
+  // İmtahanlar: test işarəli və ya test müəllimə aid imtahanlar; test tələbələrin bütün cəhdləri
+  var tE = {};
+  rawRows_('Exams').forEach(function (x) { if (isTrue_(x.isTest) || tU[x.teacherId]) tE[x.id] = x; });
+  var examRes = examIndex_().filter(function (a) { return tE[a.examId] || tS[a.studentId]; });
+  var realExams = rawRows_('Exams').filter(function (e) { return !tE[e.id] && idList_(e.studentIds).some(function (id) { return tS[id]; }); });
   // Real (test olmayan) məşğələ test müəllimə bağlıdırsa — silmək olmaz, əvvəlcə müəllimi dəyişmək lazımdır
   var conflicts = rows_('Courses').filter(function (c) { return !tC[c.id] && tU[c.teacherId]; });
   var realWithTestStudents = rawRows_('Courses').filter(function (c) {
     return !tC[c.id] && idList_(c.studentIds).some(function (id) { return tS[id]; });
   });
-  return { tU: tU, tS: tS, tC: tC, lessons: lessons, payments: payments, transfers: transfers, surveys: surveys,
+  return { tU: tU, tS: tS, tC: tC, tE: tE, examRes: examRes, realExams: realExams, lessons: lessons, payments: payments, transfers: transfers, surveys: surveys,
     notifs: notifs, annSeen: annSeen, conflicts: conflicts, realWithTestStudents: realWithTestStudents };
 }
 function testCounts_(sc) {
   var lessonIds = {}; sc.lessons.forEach(function (l) { lessonIds[l.lessonId] = true; });
   return {
     teachers: Object.keys(sc.tU).length, students: Object.keys(sc.tS).length, courses: Object.keys(sc.tC).length,
-    lessons: Object.keys(lessonIds).length, payments: sc.payments.length,
-    other: sc.transfers.length + sc.surveys.length + sc.notifs.length + sc.annSeen.length
+    lessons: Object.keys(lessonIds).length, payments: sc.payments.length, exams: Object.keys(sc.tE).length,
+    other: sc.transfers.length + sc.surveys.length + sc.notifs.length + sc.annSeen.length + sc.examRes.length
   };
 }
 function testDataInfo_(u, req) {
@@ -2137,7 +2305,7 @@ function genTestData_(u, req) {
   };
   var nT = n('teachers'), nS = n('students'), nC = n('courses'), nL = n('lessons');
   var mix = ['mixed', 'individual', 'group'].indexOf(req.mix) !== -1 ? req.mix : 'mixed';
-  var withPay = !!req.payments, withPast = !!req.pastMonth;
+  var withPay = !!req.payments, withPast = !!req.pastMonth, withExams = !!req.exams;
   if (!nT && !nS && !nC) throw fail_('Heç olmasa bir rəqəm daxil edin.');
 
   var stamp = now_(), today = today_();
@@ -2241,11 +2409,24 @@ function genTestData_(u, req) {
   insertMany_('Lessons', newL);
   insertMany_('Payments', newP);
 
-  var res = { teachers: newU.length, students: newS.length, courses: newC.length, lessons: lessonCount, payments: newP.length,
+  // Nümunə imtahanlar: məşğələsi olan hər test müəllimə bir imtahan (bir neçə hazır nəticə ilə)
+  var newE = [], newR = [];
+  if (withExams && newC.length) {
+    var byT = {};
+    newC.forEach(function (c) { var l = byT[c.teacherId] || (byT[c.teacherId] = []); idList_(c.studentIds).forEach(function (id) { if (l.indexOf(id) === -1 && l.length < 12) l.push(id); }); });
+    Object.keys(byT).slice(0, 10).forEach(function (tid, k) {
+      var pack = examTestRows_(tid, byT[tid], u.id, stamp, k + 1);
+      newE.push(pack.exam); newR = newR.concat(pack.results);
+    });
+    insertMany_('Exams', newE);
+    insertMany_('ExamResults', newR);
+  }
+
+  var res = { teachers: newU.length, students: newS.length, courses: newC.length, lessons: lessonCount, payments: newP.length, exams: newE.length, examResults: newR.length,
     logins: newU.map(function (x) { return x.login; }), password: TEST_PASSWORD, autoTeachers: autoT, autoStudents: autoS };
   log_(u, 'dev', 'Test məlumatları yaratdı',
     res.teachers + ' müəllim, ' + res.students + ' tələbə, ' + res.courses + ' məşğələ, ' + res.lessons + ' dərs, ' + res.payments + ' ödəniş' +
-    (withPast ? ' · keçmiş ay ilə' : ''));
+    (res.exams ? ', ' + res.exams + ' imtahan (' + res.examResults + ' nəticə)' : '') + (withPast ? ' · keçmiş ay ilə' : ''));
   return res;
 }
 
@@ -2264,6 +2445,14 @@ function purgeTestData_(u, req) {
     update_('Courses', c, { studentIds: keep.join(','), updatedAt: now_() });
   });
   var rowsOf = function (list) { return list.map(function (r) { return r._row; }); };
+  // İmtahanlar: test cəhdləri və test imtahanları silinir; real imtahanların təyinatından test tələbələr çıxarılır
+  sc.realExams.forEach(function (e) {
+    var keep = idList_(e.studentIds).filter(function (id) { return !sc.tS[id]; });
+    var keys = parseJson_(e.keys, {}), nk = {}; keep.forEach(function (id) { if (keys[id]) nk[id] = keys[id]; });
+    update_('Exams', e, { studentIds: keep.join(','), keys: JSON.stringify(nk), updatedAt: now_() });
+  });
+  removeRows_('ExamResults', rowsOf(sc.examRes));
+  removeRows_('Exams', Object.keys(sc.tE).map(function (k) { return sc.tE[k]._row; }));
   removeRows_('Lessons', rowsOf(sc.lessons));
   removeRows_('Payments', rowsOf(sc.payments));
   removeRows_('Transfers', rowsOf(sc.transfers));
@@ -2276,6 +2465,7 @@ function purgeTestData_(u, req) {
   removeRows_('Users', objRows(sc.tU));
   log_(u, 'dev', 'Bütün test məlumatlarını sildi',
     counts.teachers + ' müəllim, ' + counts.students + ' tələbə, ' + counts.courses + ' məşğələ, ' + counts.lessons + ' dərs, ' + counts.payments + ' ödəniş' +
+    (counts.exams ? ', ' + counts.exams + ' imtahan' : '') +
     (sc.realWithTestStudents.length ? ' · ' + sc.realWithTestStudents.length + ' real məşğələdən test tələbələri çıxarıldı' : ''));
   return { removed: counts, cleanedReal: sc.realWithTestStudents.length };
 }
@@ -2483,4 +2673,1197 @@ function archiveInfo_(u, req) {
     autoNext: st.last ? addDays_(st.last, AUTO_ARCHIVE_DAYS) : '',
     triggers: triggersStatus_()
   };
+}
+
+// ===================== TOPLU İDXAL (siyahıdan müəllim, tələbə və məşğələ) =====================
+// Mətn formatı (hər sətir bir qeyd; sahələr « | » ilə ayrılır):
+//   Müəllim: Ad Soyad | Fənn | Telefon | login (istəyə bağlı)
+//   Qrup: Qrupun adı | 8 və ya 12
+//   Tələbə Ad Soyad | Telefon | Valideyn | Valideynin telefonu
+//   Fərdi: 8 və ya 12        ← bundan sonrakı hər tələbə ayrıca fərdi məşğələdir
+//   Tələbələr:               ← məşğələsiz tələbələr
+// Yalnız yeni sətirlər əlavə olunur — mövcud məlumat dəyişdirilmir və silinmir (istisna: mövcud qrupa yeni tələbə əlavə edilir).
+var IMPORT_KEYS = {
+  muellim: 'T', muellime: 'T', teacher: 'T', 'учитель': 'T', 'преподаватель': 'T', 'педагог': 'T',
+  qrup: 'G', qrupu: 'G', group: 'G', 'группа': 'G',
+  ferdi: 'I', ferdimesgele: 'I', ferdiders: 'I', individual: 'I', 'индивидуально': 'I', 'индивидуальные': 'I', 'индивидуальный': 'I',
+  telebeler: 'S', telebe: 'S', sagirdler: 'S', students: 'S', 'ученики': 'S', 'студенты': 'S'
+};
+var IMPORT_SUBJECTS = [
+  ['riyaziyyat', 'math'], ['математик', 'math'], ['mathem', 'math'], ['math', 'math'], ['cebr', 'math'], ['hendese', 'math'], ['geometr', 'math'],
+  ['kimya', 'chem'], ['хими', 'chem'], ['chem', 'chem'],
+  ['tarix', 'hist'], ['истори', 'hist'], ['hist', 'hist'],
+  ['fizika', 'phys'], ['физик', 'phys'], ['phys', 'phys'],
+  ['biologiya', 'bio'], ['биологи', 'bio'], ['biolog', 'bio'],
+  ['ielts', 'ielts'], ['toefl', 'toefl'],
+  ['ingilis', 'eng'], ['english', 'eng'], ['англий', 'eng'],
+  ['rus', 'rus'], ['русск', 'rus'],
+  ['azerbaycan', 'az'], ['ana dili', 'az'], ['азербайджан', 'az'],
+  ['edebiyyat', 'lit'], ['литератур', 'lit'],
+  ['cografiya', 'geo'], ['географи', 'geo'], ['geograf', 'geo'],
+  ['informatika', 'inf'], ['информатик', 'inf'], ['proqram', 'code'], ['программ', 'code'],
+  ['alman', 'ger'], ['немец', 'ger'], ['fransiz', 'fr'], ['француз', 'fr'], ['turk', 'tur'], ['турец', 'tur'], ['ereb', 'arab'], ['араб', 'arab'],
+  ['ispan', 'esp'], ['испан', 'esp'], ['cin dili', 'chin'], ['китай', 'chin'], ['koreya', 'kor'], ['корей', 'kor'],
+  ['mentiq', 'logic'], ['логик', 'logic'], ['ibtidai', 'prim'], ['началь', 'prim'], ['hazirliq', 'prep'], ['подготов', 'prep'],
+  ['musiqi', 'mus'], ['музык', 'mus'], ['resm', 'art'], ['рисов', 'art'], ['sahmat', 'chess'], ['шахмат', 'chess'],
+  ['huquq', 'law'], ['iqtisad', 'econ'], ['эконом', 'econ'], ['psixolog', 'psy'], ['психолог', 'psy']
+];
+var CYR_LAT = { 'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'j', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+  'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'x', 'ц': 'ts', 'ч': 'c', 'ш': 's', 'щ': 's', 'ъ': '', 'ы': 'i', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+  'ә': 'e', 'ғ': 'g', 'ҝ': 'g', 'ө': 'o', 'ү': 'u', 'һ': 'h', 'ҹ': 'c', 'ј': 'y' };
+
+// Yalnız latın hərfləri və rəqəmlər (login üçün): ə→e, ç→c, ş→s, kiril → latın
+function latin_(s) {
+  var f = fold_(s);
+  try { f = f.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+  return f.replace(/[Ѐ-ӿ]/g, function (ch) { return CYR_LAT[ch] === undefined ? '' : CYR_LAT[ch]; }).replace(/[^a-z0-9]/g, '');
+}
+function subjectCode_(subject) {
+  var f = fold_(subject).replace(/\s+/g, ' ').trim();
+  if (!f) return '';
+  for (var i = 0; i < IMPORT_SUBJECTS.length; i++) if (f.indexOf(IMPORT_SUBJECTS[i][0]) !== -1) return IMPORT_SUBJECTS[i][1];
+  return latin_(subject).slice(0, 4);
+}
+// «Rəna Əliyeva» + «Riyaziyyat» → renamath (təkrar olarsa: renamath2, renamath3 …)
+function loginFor_(name, subject, taken) {
+  var first = latin_(String(name).trim().split(/\s+/)[0] || '');
+  if (!first) first = latin_(name) || 'muellim';
+  var base = (first.slice(0, 20) + subjectCode_(subject)).slice(0, 26);
+  while (base.length < 3) base += '1';
+  var login = base, n = 2;
+  while (taken[login]) { login = base + n; n++; }
+  taken[login] = true;
+  return login;
+}
+function looksPhone_(s) { return /^[0-9+()\-\s]{5,25}$/.test(s) && digits_(s).length >= 5; }
+
+/** Mətni oxuyur və planı qurur (heç nə yazmır). */
+function importPlan_(text) {
+  var errors = [], warnings = [];
+  var err = function (line, t) { if (errors.length < 200) errors.push({ line: line, text: t }); };
+  var warn = function (line, t) { if (warnings.length < 200) warnings.push({ line: line, text: t }); };
+  var lines = String(text || '').replace(/\r/g, '').split('\n');
+  var teachers = [], tIndex = {}, loose = [];
+  var curT = null, curC = null, mode = '';
+  var split = function (s, comma) { return s.split(comma ? /\s*[|;\t,]\s*/ : /\s*[|;\t]\s*/).map(function (x) { return x.trim(); }); };
+
+  lines.forEach(function (raw, i) {
+    var ln = i + 1;
+    var line = raw.replace(/[ ​﻿]/g, ' ').trim();
+    if (!line || line[0] === '#' || line.slice(0, 2) === '//') return;
+    line = line.replace(/^[-–—•*]\s+/, '').replace(/^\d{1,3}[.)]\s+/, '');   // «- Ad», «1. Ad», «2) Ad» kimi siyahı işarələri
+    var kw = line.match(/^([^:|;\t,0-9]{3,22}?)\s*:\s*(.*)$/);
+    var kind = kw ? IMPORT_KEYS[fold_(kw[1]).replace(/\s+/g, '')] : null;
+
+    if (kind === 'T') {
+      var f = split(kw[2], true), name = '', subject = '', phone = '', login = '';
+      f.forEach(function (x) {
+        if (!x) return;
+        var lg = x.match(/^login\s*[:=]?\s*(\S+)$/i);
+        if (lg) { login = lg[1]; return; }
+        if (looksPhone_(x)) { if (!phone) phone = x; return; }
+        if (!name) name = x; else if (!subject) subject = x; else warn(ln, 'Artıq sahə nəzərə alınmadı: «' + x.slice(0, 40) + '». Login vermək üçün «login: ad» yazın.');
+      });
+      curC = null; mode = '';
+      if (name.length < 2 || name.length > 80) { err(ln, 'Müəllimin adı yazılmayıb. Nümunə: Müəllim: Rəna Əliyeva | Riyaziyyat'); curT = null; return; }
+      if (login && !/^[A-Za-z0-9._-]{3,30}$/.test(login)) { err(ln, 'Login 3–30 simvol olmalı və yalnız latın hərfləri, rəqəmlər, nöqtə, alt xətt və ya tire daxil etməlidir: ' + login); login = ''; }
+      var key = fold_(name) + '|' + fold_(subject);
+      if (tIndex[key]) { curT = tIndex[key]; warn(ln, '«' + name + '» siyahıda təkrarlanır — eyni müəllim sayıldı, məşğələlər birləşdirildi.'); }
+      else { curT = { line: ln, name: name.slice(0, 80), subject: subject.slice(0, 60), phone: phone, login: login, courses: [] }; tIndex[key] = curT; teachers.push(curT); }
+      return;
+    }
+    if (kind === 'G') {
+      if (!curT) { err(ln, 'Qrupdan əvvəl müəllim sətri olmalıdır: «Müəllim: Ad Soyad | Fənn».'); curC = null; mode = 'skip'; return; }
+      var g = split(kw[2], false), title = '', N = 8;
+      g.forEach(function (x) { if (!x) return; if (/^\d{1,2}$/.test(x)) N = Number(x); else if (!title) title = x; });
+      if (N !== 8 && N !== 12) { err(ln, 'Aylıq dərs sayı 8 və ya 12 olmalıdır.'); N = 8; }
+      curC = { line: ln, type: 'group', title: title.slice(0, 80), lessons: N, students: [] };
+      curT.courses.push(curC); mode = 'group';
+      return;
+    }
+    if (kind === 'I') {
+      if (!curT) { err(ln, 'Fərdi məşğələlərdən əvvəl müəllim sətri olmalıdır: «Müəllim: Ad Soyad | Fənn».'); curC = null; mode = 'skip'; return; }
+      var v = kw[2].replace(/[^\d]/g, ''), NI = v ? Number(v) : 8;
+      if (NI !== 8 && NI !== 12) { err(ln, 'Aylıq dərs sayı 8 və ya 12 olmalıdır.'); NI = 8; }
+      curC = null; mode = 'ind'; curT._indN = NI;
+      return;
+    }
+    if (kind === 'S') { curT = null; curC = null; mode = 'students'; if (!kw[2].trim()) return; line = kw[2]; }
+
+    // tələbə sətri
+    if (mode === 'skip') return;
+    var p = split(line, true), st = { line: ln, name: (p[0] || '').replace(/\s+/g, ' ').slice(0, 80), phone: '', parentName: '', parentPhone: '', note: '' };
+    for (var k = 1; k < p.length; k++) {
+      var x = p[k]; if (!x) continue;
+      var letters = /[A-Za-zƏəİıÖöÜüÇçŞşĞğА-Яа-яЁё]/.test(x);
+      if (looksPhone_(x)) { if (st.parentName || st.phone) { if (!st.parentPhone) st.parentPhone = x; } else st.phone = x; }
+      else if (!letters) err(ln, 'Telefon nömrəsi düzgün deyil: ' + x.slice(0, 40));
+      else if (!st.parentName && !/\d/.test(x)) st.parentName = x.replace(/^(valideyn|ana|ata|родитель)\s*[:\-–]\s*/i, '').slice(0, 80);
+      else st.note = (st.note ? st.note + '; ' : '') + x.slice(0, 200);     // rəqəmli mətn (məs. «9-cu sinif») — qeyd kimi saxlanılır
+    }
+    if (st.name.indexOf(':') !== -1) { err(ln, 'Sətir oxunmadı: «' + line.slice(0, 60) + '». Açar sözlər: «Müəllim:», «Qrup:», «Fərdi:», «Tələbələr:».'); return; }
+    if (st.name.length < 2 || !/[A-Za-zƏəİıÖöÜüÇçŞşĞğА-Яа-яЁё]/.test(st.name)) { err(ln, 'Tələbənin adı oxunmadı: «' + line.slice(0, 60) + '».'); return; }
+    if (mode === 'group' && curC) {
+      if (curC.students.some(function (y) { return fold_(y.name) === fold_(st.name); })) { warn(ln, '«' + st.name + '» bu qrupda təkrarlanır — bir dəfə sayıldı.'); return; }
+      curC.students.push(st);
+    } else if (mode === 'ind' && curT) {
+      curT.courses.push({ line: ln, type: 'individual', title: '', lessons: curT._indN || 8, students: [st] });
+    } else if (mode === 'students' || !curT) {
+      if (mode !== 'students' && !loose.length) warn(ln, 'Bu sətirdən əvvəl müəllim göstərilməyib — tələbə məşğələsiz əlavə olunacaq.');
+      loose.push(st);
+    } else {
+      err(ln, 'Tələbədən əvvəl «Qrup: …» və ya «Fərdi:» sətri olmalıdır.');
+    }
+  });
+
+  teachers.forEach(function (t) {
+    t.courses = t.courses.filter(function (c) {
+      if (c.type !== 'group') return true;
+      if (c.students.length >= 2) return true;
+      err(c.line, 'Qrupda ən azı 2 tələbə olmalıdır' + (c.title ? ' («' + c.title + '»)' : '') + '. Bir tələbə üçün «Fərdi:» yazın.');
+      return false;
+    });
+  });
+  return { teachers: teachers, loose: loose, errors: errors, warnings: warnings };
+}
+
+/** Planı mövcud məlumatla tutuşdurur: nə yenidir, nə artıq var. */
+function importResolve_(plan) {
+  var users = rawRows_('Users'), liveUsers = rows_('Users'), students = rows_('Students'), courses = rows_('Courses');
+  var warn = function (line, t) { if (plan.warnings.length < 200) plan.warnings.push({ line: line, text: t }); };
+  var err = function (line, t) { if (plan.errors.length < 200) plan.errors.push({ line: line, text: t }); };
+
+  // --- müəllimlər ---
+  var taken = {}; users.forEach(function (x) { taken[lower_(x.login)] = true; });
+  plan.teachers.forEach(function (t) {
+    var same = liveUsers.filter(function (x) { return (x.role === 'teacher' || x.role === 'superadmin') && fold_(x.name) === fold_(t.name); });
+    var hit = same.filter(function (x) { return fold_(x.subject) === fold_(t.subject); })[0] || same.filter(function (x) { return !x.subject || !t.subject; })[0];
+    if (hit) { t.isNew = false; t.id = hit.id; t.login = hit.login; if (!t.subject) t.subject = hit.subject || ''; return; }
+    if (same.length) warn(t.line, '«' + t.name + '» adlı müəllim artıq var, amma fənni fərqlidir — yeni hesab yaradılacaq.');
+    t.isNew = true;
+    if (t.login) {
+      if (taken[lower_(t.login)]) { err(t.line, '«' + t.login + '» logini artıq istifadə olunur.'); return; }
+      taken[lower_(t.login)] = true;
+    } else t.login = loginFor_(t.name, t.subject, taken);
+  });
+
+  // --- tələbələr: eyni ad (+ fərqli olmayan telefon) = eyni şəxs ---
+  var mentions = [];
+  plan.teachers.forEach(function (t) { t.courses.forEach(function (c) { c.students.forEach(function (s) { mentions.push(s); }); }); });
+  plan.loose.forEach(function (s) { mentions.push(s); });
+  var byName = {};
+  mentions.forEach(function (s) { var k = fold_(s.name); (byName[k] = byName[k] || []).push(s); });
+  var existingByName = {};
+  students.forEach(function (s) { var k = fold_(s.name); (existingByName[k] = existingByName[k] || []).push(s); });
+  var people = [], claimed = {};
+  Object.keys(byName).forEach(function (k) {
+    var list = byName[k], persons = [];
+    list.forEach(function (s) {
+      var d = digits_(s.phone);
+      var p = persons.filter(function (x) { return !d || !x.digits || x.digits === d; })[0];
+      if (!p) { p = { name: s.name, phone: '', digits: '', parentName: '', parentPhone: '', note: '', line: s.line, refs: 0 }; persons.push(p); }
+      if (d && !p.digits) { p.digits = d; p.phone = s.phone; }
+      if (s.parentName && !p.parentName) p.parentName = s.parentName;
+      if (s.parentPhone && !p.parentPhone) p.parentPhone = s.parentPhone;
+      if (s.note && !p.note) p.note = s.note;
+      p.refs++; s._p = p;
+    });
+    if (persons.length > 1) warn(persons[1].line, '«' + persons[0].name + '» adlı ' + persons.length + ' tələbə var (telefonları fərqlidir) — ayrı-ayrı tələbə kimi əlavə olunacaq.');
+    var ex = existingByName[k] || [];
+    persons.forEach(function (p) {
+      var hit = ex.filter(function (e) { return !claimed[e.id] && p.digits && digits_(e.phone) === p.digits; })[0] ||
+                ex.filter(function (e) { return !claimed[e.id] && (!p.digits || !digits_(e.phone)); })[0];
+      if (hit) { p.isNew = false; p.id = hit.id; claimed[hit.id] = true; }
+      else { p.isNew = true; if (ex.length) warn(p.line, '«' + p.name + '» adlı tələbə artıq var, amma telefonu fərqlidir — yeni tələbə kimi əlavə olunacaq.'); }
+      people.push(p);
+    });
+  });
+
+  // --- məşğələlər ---
+  var out = [];
+  plan.teachers.forEach(function (t) {
+    var mine = t.isNew ? [] : courses.filter(function (c) { return c.teacherId === t.id; });
+    t.courses.forEach(function (c) {
+      c.teacher = t; c.isNew = true; c.add = 0;
+      if (!t.isNew) {
+        if (c.type === 'group' && c.title) {
+          var g = mine.filter(function (x) { return x.type === 'group' && fold_(x.title) === fold_(c.title); })[0];
+          if (g) { c.isNew = false; c.id = g.id; var have = idList_(g.studentIds);
+            c.add = c.students.filter(function (s) { return s._p.isNew || have.indexOf(s._p.id) === -1; }).length; }
+        } else if (c.type === 'group' && c.students.every(function (s) { return !s._p.isNew; })) {
+          // adsız qrup: eyni müəllim + eyni tələbə tərkibi = eyni qrup
+          var sig = c.students.map(function (s) { return s._p.id; }).sort().join(',');
+          var g2 = mine.filter(function (x) { return x.type === 'group' && idList_(x.studentIds).sort().join(',') === sig; })[0];
+          if (g2) { c.isNew = false; c.id = g2.id; }
+        } else if (c.type === 'individual' && !c.students[0]._p.isNew) {
+          var sid = c.students[0]._p.id;
+          var ind = mine.filter(function (x) { return x.type === 'individual' && idList_(x.studentIds).join(',') === sid; })[0];
+          if (ind) { c.isNew = false; c.id = ind.id; }
+        }
+      }
+      out.push(c);
+    });
+  });
+  plan.people = people; plan.courses = out;
+  return plan;
+}
+
+function importView_(plan, pw, must) {
+  var T = plan.teachers, C = plan.courses, P = plan.people;
+  return {
+    summary: {
+      teachersNew: T.filter(function (t) { return t.isNew; }).length, teachersOld: T.filter(function (t) { return !t.isNew; }).length,
+      studentsNew: P.filter(function (p) { return p.isNew; }).length, studentsOld: P.filter(function (p) { return !p.isNew; }).length,
+      coursesNew: C.filter(function (c) { return c.isNew; }).length, coursesOld: C.filter(function (c) { return !c.isNew; }).length,
+      joins: C.reduce(function (a, c) { return a + (c.isNew ? 0 : c.add); }, 0),
+      repeats: P.filter(function (p) { return p.refs > 1; }).length
+    },
+    teachers: T.map(function (t) { return { line: t.line, name: t.name, subject: t.subject, phone: t.phone, login: t.login, isNew: !!t.isNew, courses: t.courses.length }; }),
+    courses: C.slice(0, 600).map(function (c) { return { line: c.line, type: c.type, title: c.title, teacherName: c.teacher.name, lessons: c.lessons,
+      students: c.students.map(function (s) { return s.name; }), isNew: c.isNew, add: c.add }; }),
+    students: P.slice(0, 800).map(function (p) { return { name: p.name, phone: p.phone, isNew: p.isNew, refs: p.refs }; }),
+    studentsTotal: P.length, coursesTotal: C.length,
+    errors: plan.errors, warnings: plan.warnings, password: pw, mustChange: must
+  };
+}
+
+function importRun_(u, req) {
+  need_(u, 'tools.import');
+  var text = String(req.text || '');
+  if (!text.trim()) throw fail_('Siyahını mətn sahəsinə yapışdırın.');
+  if (text.length > IMPORT_LIMITS.chars) throw fail_('Siyahı həddən artıq uzundur. Onu hissələrə bölüb ayrı-ayrı idxal edin.');
+  var pw = req.password === undefined || req.password === '' ? IMPORT_PASSWORD : String(req.password);
+  if (pw.length < 4 || pw.length > 50 || /\s/.test(pw)) throw fail_('İlkin şifrə 4–50 simvol olmalı və boşluqsuz yazılmalıdır.');
+  var must = req.mustChange !== false;
+
+  var plan = importResolve_(importPlan_(text));
+  var view = importView_(plan, pw, must);
+  var sm = view.summary;
+  if (sm.teachersNew > IMPORT_LIMITS.teachers || sm.studentsNew > IMPORT_LIMITS.students || sm.coursesNew > IMPORT_LIMITS.courses) {
+    plan.errors.push({ line: 0, text: 'Bir dəfəyə ən çoxu ' + IMPORT_LIMITS.teachers + ' müəllim, ' + IMPORT_LIMITS.students + ' tələbə və ' + IMPORT_LIMITS.courses + ' məşğələ idxal etmək olar. Siyahını hissələrə bölün.' });
+  }
+  if (!plan.teachers.length && !plan.people.length && !plan.errors.length) plan.errors.push({ line: 0, text: 'Siyahıda heç bir müəllim və ya tələbə tapılmadı. «Necə istifadə etməli» düyməsindəki nümunəyə baxın.' });
+  if (req.dry) { view.dry = true; return view; }
+  if (plan.errors.length) throw fail_('Siyahıda ' + plan.errors.length + ' xəta var. Əvvəlcə «Yoxla» düyməsi ilə xətaları düzəldin.');
+  if (!sm.teachersNew && !sm.studentsNew && !sm.coursesNew && !sm.joins) { view.done = true; view.nothing = true; view.created = []; return view; }
+
+  var stamp = now_(), today = today_(), logs = [];
+  var usedIds = {};
+  var nid = function (p) { var id; do { id = newId_(p); } while (usedIds[id]); usedIds[id] = true; return id; };
+  var role = ROLE_LABELS[u.role] || u.role;
+  var lg = function (type, action, details) { logs.push({ id: nid('L'), time: stamp, userId: u.id, userName: u.name, role: role, type: type, action: action, details: details }); };
+
+  // 1) müəllimlər
+  var newU = [];
+  plan.teachers.forEach(function (t) {
+    if (!t.isNew) return;
+    t.id = nid('U');
+    newU.push({ id: t.id, name: t.name, login: t.login, password: pw, role: 'teacher', phone: looksPhone_(t.phone) ? t.phone : '', permissions: '', theme: 'light',
+      createdAt: stamp, updatedAt: '', deletedAt: '', deletedBy: '', installHint: '', newsSeenAt: '', isTest: '', mustChange: must ? 'true' : '', subject: t.subject });
+    lg('teacher', 'Toplu idxal: müəllim əlavə etdi', t.name + ' · Login: ' + t.login + (t.subject ? ' · Fənn: ' + t.subject : '') + (must ? ' · ilk girişdə şifrə dəyişdirilməlidir' : ''));
+  });
+  // 2) tələbələr
+  var newS = [];
+  plan.people.forEach(function (p) {
+    if (!p.isNew) return;
+    p.id = nid('S');
+    newS.push({ id: p.id, name: p.name, phone: p.phone, parentName: p.parentName, parentPhone: p.parentPhone, note: p.note || '', cardToken: newToken_(), status: 'active',
+      createdAt: stamp, updatedAt: '', deletedAt: '', deletedBy: '', isTest: '' });
+    lg('student', 'Toplu idxal: tələbə əlavə etdi', p.name + (p.phone ? ' · Tel: ' + p.phone : '') + (p.parentName ? ' · Valideyn: ' + p.parentName : ''));
+  });
+  // 3) məşğələlər
+  var newC = [], joins = 0;
+  var existing = {}; rows_('Courses').forEach(function (c) { existing[c.id] = c; });
+  plan.courses.forEach(function (c) {
+    var ids = c.students.map(function (s) { return s._p.id; }).filter(function (v, i, a) { return a.indexOf(v) === i; });
+    if (c.isNew) {
+      var id = nid('C');
+      newC.push({ id: id, title: c.title, type: c.type, teacherId: c.teacher.id, studentIds: ids.join(','), lessonsPerMonth: String(c.lessons), monthNo: '1', monthStart: today,
+        createdAt: stamp, updatedAt: '', deletedAt: '', deletedBy: '', isTest: '' });
+      lg('course', 'Toplu idxal: ' + (c.type === 'group' ? 'qrup' : 'fərdi') + ' məşğələ yaratdı',
+        '«' + (c.title || c.students.map(function (s) { return s.name; }).slice(0, 2).join(', ')) + '» · Müəllim: ' + c.teacher.name + ' · Tələbə' + (ids.length > 1 ? 'lər' : '') + ': ' +
+        c.students.map(function (s) { return s.name; }).join(', ') + ' · Ayda ' + c.lessons + ' dərs');
+    } else if (c.type === 'group' && existing[c.id]) {
+      var row = existing[c.id], have = idList_(row.studentIds), added = ids.filter(function (x) { return have.indexOf(x) === -1; });
+      if (added.length) {
+        update_('Courses', row, { studentIds: have.concat(added).join(','), updatedAt: stamp });
+        joins += added.length;
+        lg('course', 'Toplu idxal: qrupa tələbə əlavə etdi', '«' + (c.title || 'Qrup') + '» · ' + c.students.filter(function (s) { return added.indexOf(s._p.id) !== -1; }).map(function (s) { return s.name; }).join(', '));
+      }
+    }
+  });
+  insertMany_('Users', newU);
+  insertMany_('Students', newS);
+  insertMany_('Courses', newC);
+  lg('import', 'Toplu idxal etdi', newU.length + ' müəllim, ' + newS.length + ' tələbə, ' + newC.length + ' məşğələ' + (joins ? ', mövcud qruplara ' + joins + ' tələbə' : '') +
+    (newU.length ? ' · Loginlər: ' + newU.map(function (x) { return x.login; }).join(', ') : ''));
+  insertMany_('Logs', logs);
+
+  view.done = true;
+  view.created = newU.map(function (x) { return { name: x.name, login: x.login, subject: x.subject }; });
+  view.result = { teachers: newU.length, students: newS.length, courses: newC.length, joins: joins };
+  return view;
+}
+
+// ===================== İMTAHANLAR =====================
+// Model: imtahan — şablon (suallar bir dəfə, JSON kimi saxlanılır); hər cəhd — ExamResults vərəqində bir sətir.
+// Qaydalar:
+//  · müəllim yalnız öz imtahanlarını və öz məşğələlərindəki tələbələri görür; icazəsi olan (exams.*) — hamısını;
+//  · ilk cəhddən sonra suallar, ballar və keçid balı dəyişdirilmir (kilid) — yalnız şərtlər və təyinat;
+//  · vaxt serverdə hesablanır (deadline); düzgün cavablar imtahan bitənə qədər tələbəyə göndərilmir;
+//  · cəhd sayı məhdud deyil; hər cəhd ayrıca saxlanılır.
+var EXAM_END = { submit: 'tələbə özü bitirdi', time: 'vaxt bitdi', violations: 'qayda pozuntularına görə dayandırıldı' };
+var EXAM_VKINDS = { leave: 1, copy: 1, paste: 1, shot: 1, print: 1, other: 1 };
+
+function parseJson_(s, fb) {
+  if (s === '' || s === null || s === undefined) return fb;
+  try { var v = JSON.parse(s); return v === null || v === undefined ? fb : v; } catch (e) { return fb; }
+}
+function range_(n) { var a = []; for (var i = 0; i < n; i++) a.push(i); return a; }
+function shuffle_(a) { for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+function num_(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+function pts_(v) { var n = Number(String(v).replace(',', '.')); return isFinite(n) ? Math.round(n * 2) / 2 : NaN; }   // bal addımı 0.5
+function pct_(score, max) { max = num_(max); return max > 0 ? Math.round(num_(score) / max * 100) : 0; }
+function msToStamp_(ms) { return Utilities.formatDate(new Date(ms), TIMEZONE, 'yyyy-MM-dd HH:mm:ss'); }
+
+// Böyük JSON-u 3 xanaya bölür (xana limiti 50 000 simvol). Parça «'» və ya «=» ilə başlamır, surroqat cütü bölünmür.
+function chunks_(s) {
+  var out = [], i = 0;
+  while (i < s.length && out.length < 3) {
+    var end = Math.min(s.length, i + EXAM_CHUNK);
+    if (end < s.length) {
+      var guard = 0;
+      while (guard++ < 40 && end > i + 1) {
+        var prev = s.charCodeAt(end - 1), next = s.charAt(end);
+        if ((prev >= 0xD800 && prev <= 0xDBFF) || next === "'" || next === '=') end--; else break;
+      }
+    }
+    out.push(s.slice(i, end)); i = end;
+  }
+  if (i < s.length) return null;
+  while (out.length < 3) out.push('');
+  return out;
+}
+function bigPut_(prefix, value, what) {
+  var c = chunks_(JSON.stringify(value));
+  if (!c) throw fail_((what || 'Mətn') + ' həddən artıq böyükdür. Zəhmət olmasa, qısaldın.');
+  var o = {}; o[prefix] = c[0]; o[prefix + '2'] = c[1]; o[prefix + '3'] = c[2];
+  return o;
+}
+// Cavablar xanalara sığmırsa (çox nadir: onlarla çox uzun açıq cavab), ən uzun mətnlər qısaldılır — cəhd heç vaxt «ilişib» qalmasın
+function answersPut_(ans) {
+  var guard = 0;
+  while (guard++ < 60 && JSON.stringify(ans).length > EXAM_CHUNK * 3 - 3000) {
+    var longest = null;
+    Object.keys(ans).forEach(function (k) { if (typeof ans[k] === 'string' && (longest === null || ans[k].length > ans[longest].length)) longest = k; });
+    if (longest === null) break;
+    ans[longest] = ans[longest].slice(0, Math.max(200, Math.floor(ans[longest].length * 0.6)));
+  }
+  return bigPut_('answers', ans, 'Cavablar');
+}
+function bigGet_(row, prefix, fb) {
+  var s = String(row[prefix] || '') + String(row[prefix + '2'] || '') + String(row[prefix + '3'] || '');
+  return parseJson_(s, fb);
+}
+
+// ---- sürətli indeks: ExamResults-ın ilk 4 sütunu (id, examId, status, studentId) ----
+function examIndex_() {
+  if (_raw['ExamResults#idx']) return _raw['ExamResults#idx'];
+  var m = meta_('ExamResults'), out = [];
+  if (m.head[0] !== 'id' || m.head[1] !== 'examId' || m.head[2] !== 'status' || m.head[3] !== 'studentId') {
+    out = rawRows_('ExamResults').map(function (r) { return { _row: r._row, id: r.id, examId: r.examId, status: r.status, studentId: r.studentId }; });
+  } else {
+    var last = m.sh.getLastRow();
+    if (last >= 2) {
+      var v = m.sh.getRange(2, 1, last - 1, 4).getValues();
+      for (var i = 0; i < v.length; i++) {
+        if (v[i][0] === '' || v[i][0] == null) continue;
+        out.push({ _row: i + 2, id: String(v[i][0]), examId: String(v[i][1]), status: String(v[i][2]), studentId: String(v[i][3]) });
+      }
+    }
+  }
+  _raw['ExamResults#idx'] = out;
+  return out;
+}
+function examFresh_() { delete _raw.Exams; delete _raw.ExamResults; delete _raw['ExamResults#idx']; }
+function attemptFull_(id) {
+  var e = examIndex_().filter(function (x) { return x.id === String(id); })[0];
+  return e ? fullRowAt_('ExamResults', e._row) : null;
+}
+function resPatch_(a, changes) {
+  setCells_('ExamResults', a._row, changes);
+  Object.keys(changes).forEach(function (k) { a[k] = changes[k]; });
+  delete _raw.ExamResults; delete _raw['ExamResults#idx'];
+}
+function examAny_(id) { return rawRows_('Exams').filter(function (x) { return x.id === String(id); })[0] || null; }   // silinmişlər daxil
+function mustExam_(id) {
+  var e = rows_('Exams').filter(function (x) { return x.id === String(id); })[0];
+  if (!e) throw fail_('İmtahan tapılmadı. Səhifəni yeniləyin.', 'NOTFOUND');
+  return e;
+}
+function examQuestionsOf_(ex) { return bigGet_(fullRowAt_('Exams', ex._row), 'questions', []); }
+function examHasAttempts_(examId) { return examIndex_().some(function (x) { return x.examId === examId; }); }
+function examKey_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 12); }
+function examAccess_(u, ex, level) {           // level: view | manage | delete
+  if (level !== 'delete' && ex.teacherId === u.id) return true;
+  return can_(u, 'exams.' + level);
+}
+function needExam_(u, ex, level) {
+  if (!examAccess_(u, ex, level)) throw fail_('Bu imtahan üçün icazəniz yoxdur.', 'PERM');
+}
+function canCreateExam_(u) {
+  if (can_(u, 'exams.manage')) return true;
+  if (u.role === 'developer' || u.role === 'helper') return false;
+  return u.role === 'teacher' || rows_('Courses').some(function (c) { return c.teacherId === u.id; });
+}
+// Müəllimin seçə biləcəyi tələbələr: öz məşğələlərindəkilər. İcazəli istifadəçi üçün null (hamısı).
+function examPool_(u) {
+  if (can_(u, 'exams.manage')) return null;
+  var ok = {};
+  rows_('Courses').forEach(function (c) { if (c.teacherId === u.id) idList_(c.studentIds).forEach(function (id) { ok[id] = true; }); });
+  return ok;
+}
+
+// ---- suallar (strukturlaşdırılmış siyahı saytda mətndən yaradılır, burada yoxlanılır) ----
+function examQuestions_(req, defPts) {
+  var inQ = Array.isArray(req.questions) ? req.questions : [];
+  if (!inQ.length) throw fail_('Ən azı bir sual əlavə edin.');
+  if (inQ.length > EXAM_MAX_Q) throw fail_('Bir imtahanda ən çoxu ' + EXAM_MAX_Q + ' sual ola bilər.');
+  var out = [], max = 0, open = 0;
+  inQ.forEach(function (q, i) {
+    var n = 'Sual ' + (i + 1) + ': ';
+    q = q || {};
+    var text = String(q.q === undefined || q.q === null ? '' : q.q).replace(/\r/g, '').trim().slice(0, 2000);
+    if (!text) throw fail_(n + 'mətn boşdur.');
+    var p = q.p === undefined || q.p === null || q.p === '' ? defPts : pts_(q.p);
+    if (!(p > 0 && p <= 100)) throw fail_(n + 'bal 0.5–100 aralığında olmalıdır.');
+    if (q.t === 'o') {
+      out.push({ t: 'o', q: text, a: String(q.a || '').replace(/\r/g, '').trim().slice(0, 2000), p: p });
+      open++;
+    } else {
+      var opts = (Array.isArray(q.o) ? q.o : []).map(function (x) { return String(x === null || x === undefined ? '' : x).replace(/\s+/g, ' ').trim().slice(0, 500); });
+      if (opts.length < 2 || opts.length > 8) throw fail_(n + 'variantların sayı 2–8 olmalıdır.');
+      if (opts.some(function (x) { return !x; })) throw fail_(n + 'boş variant var.');
+      var c = q.c === '' || q.c === null || q.c === undefined ? -1 : Math.floor(Number(q.c));
+      if (!(c >= 0 && c < opts.length)) throw fail_(n + 'düzgün cavab işarələnməyib.');
+      out.push({ t: 't', q: text, o: opts, c: c, p: p });
+    }
+    max += p;
+  });
+  return { list: out, max: Math.round(max * 100) / 100, open: open };
+}
+
+function examLight_(e, st, u) {
+  var mine = e.teacherId === u.id;
+  return {
+    id: e.id, title: e.title, subject: e.subject, teacherId: e.teacherId, teacherName: userName_(e.teacherId),
+    students: idList_(e.studentIds).length, duration: num_(e.duration), points: num_(e.points), passMin: num_(e.passMin), maxPoints: num_(e.maxPoints),
+    qCount: num_(e.qCount), openCount: num_(e.openCount), strict: isTrue_(e.strict), stopOnLimit: isTrue_(e.stopOnLimit),
+    shuffle: isTrue_(e.shuffle), reveal: isTrue_(e.reveal), active: isTrue_(e.active), locked: isTrue_(e.locked),
+    createdAt: e.createdAt, updatedAt: e.updatedAt, isTest: isTrue_(e.isTest),
+    mine: mine, canManage: !u._readOnly && (mine || can_(u, 'exams.manage')),
+    canDelete: !u._readOnly && (can_(u, 'exams.delete') || (mine && !isTrue_(e.locked))),   // nəticəsi olan imtahanı yalnız icazəli istifadəçi silir
+    stats: st || { attempts: 0, students: 0, avg: null, pending: 0, running: 0, passed: 0, last: '' }
+  };
+}
+function attemptLight_(a, ex, nameOf) {
+  var fin = a.status !== 'started', score = num_(a.score), pm = num_(a.passMin);
+  var pass = null;
+  if (fin && pm > 0) pass = score >= pm ? true : (a.status === 'done' ? false : null);   // yoxlama bitməyibsə, «keçmədi» demək tezdir
+  return {
+    id: a.id, examId: a.examId, title: ex ? ex.title : '(silinmiş imtahan)', subject: ex ? ex.subject : '',
+    studentId: a.studentId, studentName: nameOf ? nameOf(a.studentId) : '',
+    status: a.status, startedAt: a.startedAt, finishedAt: a.finishedAt, spent: num_(a.spent), duration: num_(a.dur),
+    score: fin ? score : null, maxPoints: num_(a.maxPoints), pct: fin ? pct_(score, a.maxPoints) : null, passMin: pm, pass: pass,
+    pending: num_(a.openPending), violations: num_(a.violations), endReason: a.endReason, late: num_(a.late), marks: a.marks || ''
+  };
+}
+function examStatsMap_(rows) {
+  var map = {};
+  rows.forEach(function (a) {
+    var s = map[a.examId] || (map[a.examId] = { attempts: 0, students: 0, avg: null, pending: 0, running: 0, passed: 0, last: '', _sum: 0, _n: 0, _st: {} });
+    if (a.status === 'started') { s.running++; return; }
+    s.attempts++; s._st[a.studentId] = true;
+    if (a.status === 'review') s.pending++;
+    else { s._sum += pct_(a.score, a.maxPoints); s._n++; }
+    if (num_(a.passMin) > 0 && num_(a.score) >= num_(a.passMin)) s.passed++;
+    if (a.finishedAt > s.last) s.last = a.finishedAt;
+  });
+  Object.keys(map).forEach(function (k) { var s = map[k]; s.students = Object.keys(s._st).length; s.avg = s._n ? Math.round(s._sum / s._n) : null; delete s._sum; delete s._n; delete s._st; });
+  return map;
+}
+
+// Yoxlanılmağı gözləyən açıq cavablar (istifadəçinin öz imtahanları üzrə) — menyudakı sayğac
+function examPending_(u) {
+  var rev = examIndex_().filter(function (x) { return x.status === 'review'; });
+  if (!rev.length) return 0;
+  var own = {}; rows_('Exams').forEach(function (e) { if (e.teacherId === u.id) own[e.id] = true; });
+  return rev.filter(function (x) { return own[x.examId]; }).length;
+}
+
+// Tələbə kartı: hər cəhd ayrıca (imtahan + tarix + bal), ümumi uğur — yoxlanılmış cəhdlərin orta faizi
+function examsOfStudent_(sid, uMap) {
+  if (!examIndex_().some(function (x) { return x.studentId === sid && x.status !== 'started'; })) return { list: [], avg: null, count: 0 };
+  var exMap = {}; rows_('Exams').forEach(function (e) { exMap[e.id] = e; });
+  var list = rawRows_('ExamResults').filter(function (a) { return a.studentId === sid && a.status !== 'started' && exMap[a.examId]; })
+    .map(function (a) { var o = attemptLight_(a, exMap[a.examId], null); o.teacherName = uMap && uMap[exMap[a.examId].teacherId] ? uMap[exMap[a.examId].teacherId].name : userName_(exMap[a.examId].teacherId); delete o.marks; return o; })
+    .sort(function (a, b) { return a.finishedAt < b.finishedAt ? 1 : -1; });
+  var done = list.filter(function (x) { return x.status === 'done'; });
+  var avg = done.length ? Math.round(done.reduce(function (s, x) { return s + x.pct; }, 0) / done.length) : null;
+  return { list: list, avg: avg, count: list.length };
+}
+
+// ---- STAFF: siyahı ----
+function examList_(u, req) {
+  if (u.role === 'developer') throw fail_('İcazə yoxdur.', 'PERM');
+  var all = can_(u, 'exams.view');
+  var create = canCreateExam_(u);
+  if (!all && !create && !rows_('Exams').some(function (e) { return e.teacherId === u.id; })) throw fail_('İmtahanlar bölməsi üçün icazəniz yoxdur.', 'PERM');
+  // vaxtı bitmiş, bağlanmamış cəhdlər varsa — əvvəlcə bağla (nadir hal)
+  if (examIndex_().some(function (x) { return x.status === 'started'; })) {
+    try { withLock_(function () { examFresh_(); examCloseExpired_(null); }); } catch (e) {}
+    examFresh_();
+  }
+  var exams = rows_('Exams').filter(function (e) { return all || e.teacherId === u.id; });
+  var ids = {}; exams.forEach(function (e) { ids[e.id] = true; });
+  var stats = examStatsMap_(exams.length && examIndex_().length ? rawRows_('ExamResults').filter(function (a) { return ids[a.examId]; }) : []);
+  var list = exams.map(function (e) { return examLight_(e, stats[e.id], u); })
+    .sort(function (a, b) { return (a.updatedAt || a.createdAt) < (b.updatedAt || b.createdAt) ? 1 : -1; });
+  var tMap = {}; list.forEach(function (e) { tMap[e.teacherId] = e.teacherName; });
+  return { exams: list, canCreate: create && !u._readOnly, all: all,
+    teachers: Object.keys(tMap).map(function (k) { return { id: k, name: tMap[k] }; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'az'); }) };
+}
+
+// ---- STAFF: bir imtahan (suallar, linklər, cəhdlər, sual təhlili) ----
+function examGet_(u, req) {
+  var ex = mustExam_(req.id);
+  needExam_(u, ex, 'view');
+  examCloseExpired_(ex.id);
+  ex = mustExam_(req.id);
+  var qs = examQuestionsOf_(ex);
+  var sMap = {}; rows_('Students').forEach(function (s) { sMap[s.id] = s; });
+  var showPhones = can_(u, 'students.view');
+  var keys = parseJson_(ex.keys, {});
+  var canManage = examAccess_(u, ex, 'manage');
+  var students = idList_(ex.studentIds).map(function (id) {
+    var s = sMap[id];
+    var o = { id: id, name: s ? s.name : '(silinmiş tələbə)', gone: !s, key: canManage ? (keys[id] || '') : '' };
+    if (s && showPhones) { o.phone = s.phone; o.parentPhone = s.parentPhone; }
+    return o;
+  });
+  var rows = examIndex_().some(function (x) { return x.examId === ex.id; }) ? rawRows_('ExamResults').filter(function (a) { return a.examId === ex.id; }) : [];
+  var nameOf = function (id) { return sMap[id] ? sMap[id].name : '(silinmiş tələbə)'; };
+  var attempts = rows.map(function (a) { return attemptLight_(a, ex, nameOf); })
+    .sort(function (a, b) { return (a.finishedAt || a.startedAt) < (b.finishedAt || b.startedAt) ? 1 : -1; });
+  // sual təhlili: hər sual üzrə düzgün / səhv / cavabsız (bitmiş cəhdlər)
+  var qstats = qs.map(function () { return { ok: 0, bad: 0, empty: 0, open: 0 }; });
+  attempts.forEach(function (a) {
+    if (a.status === 'started') return;
+    for (var i = 0; i < qs.length; i++) {
+      var ch = a.marks.charAt(i);
+      if (ch === '1') qstats[i].ok++; else if (ch === '0') qstats[i].bad++; else if (ch === '-' || ch === 'e') qstats[i].empty++; else if (ch) qstats[i].open++;
+    }
+  });
+  attempts.forEach(function (a) { delete a.marks; });
+  var light = examLight_(ex, examStatsMap_(rows)[ex.id], u);
+  light.note = ex.note; light.studentIds = idList_(ex.studentIds);
+  light.token = canManage ? ex.token : '';
+  light.questions = qs;
+  light.locked = rows.length > 0;
+  light.canDelete = !u._readOnly && (can_(u, 'exams.delete') || (light.mine && !rows.length));
+  if (req.first && ex.teacherId !== u.id) log_(u, 'view', 'İmtahana və nəticələrinə baxdı', '«' + ex.title + '» · Müəllim: ' + userName_(ex.teacherId));
+  return { exam: light, students: students, attempts: attempts, qstats: qstats, showPhones: showPhones };
+}
+
+function examCond_(p) {
+  return 'Müddət: ' + p.duration + ' dəq · Məhdudiyyətlər: ' + (p.strict === 'true' ? 'var' : 'yox') +
+    (p.strict === 'true' ? ' · ' + EXAM_WARN_LIMIT + ' xəbərdarlıqdan sonra bitir: ' + (p.stopOnLimit === 'true' ? 'bəli' : 'xeyr') : '');
+}
+
+function saveExam_(u, req) {
+  var old = req.id ? mustExam_(req.id) : null;
+  if (old) needExam_(u, old, 'manage');
+  else if (!canCreateExam_(u)) throw fail_('İmtahan yaratmaq üçün icazəniz yoxdur.', 'PERM');
+  var locked = old ? examHasAttempts_(old.id) : false;
+  var manageAll = can_(u, 'exams.manage');
+
+  var p = {};
+  p.title = reqStr_(req.title, 'İmtahanın adı', 2, 120);
+  p.subject = str_(req.subject, 60);
+  p.note = str_(req.note, 600);
+  var dur = Math.floor(Number(req.duration));
+  if (!(dur >= 5 && dur <= 300)) throw fail_('Müddət 5–300 dəqiqə aralığında olmalıdır.');
+  p.duration = String(dur);
+  p.strict = req.strict ? 'true' : 'false';
+  p.stopOnLimit = req.strict && req.stopOnLimit ? 'true' : 'false';
+  p.shuffle = req.shuffle ? 'true' : 'false';
+  p.reveal = req.reveal === false ? 'false' : 'true';
+  p.active = req.active === false ? 'false' : 'true';
+
+  // sahib (müəllim)
+  var teacherId = old ? old.teacherId : u.id;
+  if (manageAll && req.teacherId) {
+    var t = findUser_(req.teacherId);
+    if (!t || (t.role !== 'teacher' && t.role !== 'superadmin')) throw fail_('Müəllim seçin.');
+    teacherId = t.id;
+  }
+  p.teacherId = teacherId;
+
+  // təyinat
+  var ids = (Array.isArray(req.studentIds) ? req.studentIds : []).map(String).filter(function (v, i, a) { return v && a.indexOf(v) === i; });
+  if (!ids.length) throw fail_('Ən azı bir tələbə seçin.');
+  if (ids.length > EXAM_MAX_STUDENTS) throw fail_('Bir imtahana ən çoxu ' + EXAM_MAX_STUDENTS + ' tələbə təyin etmək olar.');
+  var pool = examPool_(u), had = old ? idList_(old.studentIds) : [];
+  var sLive = {}; rows_('Students').forEach(function (s) { sLive[s.id] = true; });
+  ids.forEach(function (id) {
+    if (had.indexOf(id) !== -1) return;                       // əvvəldən təyin olunanlar qalır
+    if (!sLive[id]) throw fail_('Seçilmiş tələbələrdən biri tapılmadı. Səhifəni yeniləyin.');
+    if (pool && !pool[id]) throw fail_('Yalnız öz məşğələlərinizdəki tələbələri seçə bilərsiniz.', 'PERM');
+  });
+  p.studentIds = ids.join(',');
+  var keys = old ? parseJson_(old.keys, {}) : {}, nk = {};
+  ids.forEach(function (id) { nk[id] = keys[id] || examKey_(); });
+  p.keys = JSON.stringify(nk);
+
+  var heavy = null, qInfo = '';
+  if (!locked) {
+    var defPts = pts_(req.points === undefined || req.points === '' ? 1 : req.points);
+    if (!(defPts > 0 && defPts <= 100)) throw fail_('Bir sualın balı 0.5–100 aralığında olmalıdır.');
+    var q = examQuestions_(req, defPts);
+    var pm = req.passMin === undefined || req.passMin === '' ? 0 : pts_(req.passMin);
+    if (!(pm >= 0)) throw fail_('Keçid balı düzgün deyil.');
+    if (pm > q.max) throw fail_('Keçid balı maksimum baldan (' + q.max + ') çox ola bilməz.');
+    p.points = String(defPts); p.passMin = String(pm); p.maxPoints = String(q.max);
+    p.qCount = String(q.list.length); p.openCount = String(q.open);
+    heavy = bigPut_('questions', q.list, 'Sualların mətni');
+    qInfo = q.list.length + ' sual (' + (q.list.length - q.open) + ' test, ' + q.open + ' açıq) · Maks. bal: ' + q.max + (pm ? ' · Keçid balı: ' + pm : '');
+  } else if (req.questions !== undefined || (req.passMin !== undefined && pts_(req.passMin) !== num_(old.passMin)) || (req.points !== undefined && pts_(req.points) !== num_(old.points))) {
+    // kilidli imtahanda suallar/ballar göndərilibsə — fərq varsa, heç nə yazılmır
+    var same = req.questions === undefined;
+    if (!same) { try { same = JSON.stringify(examQuestions_(req, num_(old.points) || 1).list) === JSON.stringify(examQuestionsOf_(old)); } catch (e) { same = false; } }
+    if (!same || (req.passMin !== undefined && pts_(req.passMin) !== num_(old.passMin)) || (req.points !== undefined && pts_(req.points) !== num_(old.points))) {
+      throw fail_('Bu imtahanı artıq yerinə yetirən var: suallar, ballar və keçid balı dəyişdirilə bilməz. Fərqli suallar üçün imtahanın surətini çıxarın.', 'LOCKED');
+    }
+  }
+
+  if (old) {
+    var ch = [];
+    if (old.title !== p.title) ch.push('Ad: «' + old.title + '» → «' + p.title + '»');
+    if (String(old.subject || '') !== p.subject) ch.push('Fənn: «' + (old.subject || '—') + '» → «' + (p.subject || '—') + '»');
+    if (String(old.note || '') !== p.note) ch.push('Qeyd dəyişdirildi');
+    if (old.duration !== p.duration) ch.push('Müddət: ' + old.duration + ' → ' + p.duration + ' dəq');
+    [['strict', 'Məhdudiyyətlər'], ['stopOnLimit', 'Xəbərdarlıqdan sonra bitmə'], ['shuffle', 'Qarışdırma'], ['reveal', 'Düzgün cavabların göstərilməsi'], ['active', 'Aktivlik']].forEach(function (x) {
+      if ((isTrue_(old[x[0]]) ? 'true' : 'false') !== p[x[0]]) ch.push(x[1] + ': ' + (p[x[0]] === 'true' ? 'açıldı' : 'söndürüldü'));
+    });
+    if (old.teacherId !== p.teacherId) ch.push('Müəllim: ' + userName_(old.teacherId) + ' → ' + userName_(p.teacherId));
+    var added = ids.filter(function (x) { return had.indexOf(x) === -1; }), removed = had.filter(function (x) { return ids.indexOf(x) === -1; });
+    if (added.length) ch.push('Əlavə edilən tələbələr: ' + added.map(studentName_).join(', '));
+    if (removed.length) ch.push('Çıxarılan tələbələr: ' + removed.map(studentName_).join(', '));
+    if (heavy) {
+      if (old.qCount !== p.qCount || old.maxPoints !== p.maxPoints || old.passMin !== p.passMin || old.points !== p.points) ch.push('Suallar: ' + qInfo);
+      else if (JSON.stringify(examQuestionsOf_(old)) !== JSON.stringify(bigGet_(heavy, 'questions', []))) ch.push('Sualların mətni dəyişdirildi');
+    }
+    p.updatedAt = now_();
+    var prevTeacher = old.teacherId, title0 = old.title;
+    var all = {}; Object.keys(p).forEach(function (k) { all[k] = p[k]; });
+    if (heavy) Object.keys(heavy).forEach(function (k) { all[k] = heavy[k]; });
+    update_('Exams', old, all);
+    log_(u, 'exam', 'İmtahanı redaktə etdi', '«' + title0 + '» — ' + (ch.join('; ') || 'dəyişiklik edilmədi'));
+    if (prevTeacher !== u.id && findUser_(prevTeacher) && ch.length) notify_([prevTeacher], 'exam', u.name + ' «' + p.title + '» imtahanınızı redaktə etdi.', 'exams', old.id);
+    if (p.teacherId !== prevTeacher && p.teacherId !== u.id) notify_([p.teacherId], 'exam', 'Sizə imtahan təyin edildi: «' + p.title + '»', 'exams', old.id);
+    return { id: old.id, locked: locked };
+  }
+
+  var row = { id: newId_('E'), token: Utilities.getUuid().replace(/-/g, '').slice(0, 24), locked: 'false', createdBy: u.id, createdAt: now_(), updatedAt: '', deletedAt: '', deletedBy: '', isTest: '' };
+  Object.keys(p).forEach(function (k) { row[k] = p[k]; });
+  Object.keys(heavy).forEach(function (k) { row[k] = heavy[k]; });
+  insertMany_('Exams', [row]);
+  log_(u, 'exam', 'İmtahan yaratdı', '«' + row.title + '» · Müəllim: ' + userName_(row.teacherId) + ' · ' + qInfo + ' · ' + examCond_(p) + ' · Tələbə sayı: ' + ids.length);
+  if (row.teacherId !== u.id) notify_([row.teacherId], 'exam', u.name + ' sizin üçün imtahan yaratdı: «' + row.title + '»', 'exams', row.id);
+  return { id: row.id, locked: false };
+}
+
+function setExamActive_(u, req) {
+  var ex = mustExam_(req.id);
+  needExam_(u, ex, 'manage');
+  var on = !!req.active;
+  if (isTrue_(ex.active) !== on) {
+    update_('Exams', ex, { active: on ? 'true' : 'false', updatedAt: now_() });
+    log_(u, 'exam', on ? 'İmtahanı açdı' : 'İmtahanı bağladı', '«' + ex.title + '»' + (on ? ' · link yenidən işləyir' : ' · link artıq yeni cəhd qəbul etmir'));
+    if (ex.teacherId !== u.id && findUser_(ex.teacherId)) notify_([ex.teacherId], 'exam', u.name + ' «' + ex.title + '» imtahanını ' + (on ? 'açdı.' : 'bağladı.'), 'exams', ex.id);
+  }
+  return { active: on };
+}
+
+function copyExam_(u, req) {
+  var ex = mustExam_(req.id);
+  needExam_(u, ex, 'manage');
+  if (!canCreateExam_(u)) throw fail_('İmtahan yaratmaq üçün icazəniz yoxdur.', 'PERM');
+  var full = fullRowAt_('Exams', ex._row);
+  var keys = {}; idList_(ex.studentIds).forEach(function (id) { keys[id] = examKey_(); });
+  var row = {};
+  SCHEMA.Exams.forEach(function (h) { row[h] = full[h]; });
+  row.id = newId_('E'); row.token = Utilities.getUuid().replace(/-/g, '').slice(0, 24);
+  row.title = (String(ex.title).slice(0, 110) + ' (surət)');
+  row.keys = JSON.stringify(keys); row.locked = 'false'; row.active = 'true';
+  row.createdBy = u.id; row.createdAt = now_(); row.updatedAt = ''; row.deletedAt = ''; row.deletedBy = ''; row.isTest = '';
+  insertMany_('Exams', [row]);
+  log_(u, 'exam', 'İmtahanın surətini çıxardı', '«' + ex.title + '» → «' + row.title + '»');
+  return { id: row.id };
+}
+
+function deleteExam_(u, req) {
+  var ex = mustExam_(req.id);
+  var has = examHasAttempts_(ex.id);
+  // nəticəsi olan imtahanı yalnız «sil» icazəsi olan silə bilər (nəticələr qorunur); nəticəsiz öz imtahanını müəllim özü silir
+  if (has || ex.teacherId !== u.id) need_(u, 'exams.delete');
+  update_('Exams', ex, { deletedAt: now_(), deletedBy: u.id });
+  log_(u, 'exam', 'İmtahanı sildi', '«' + ex.title + '» · Müəllim: ' + userName_(ex.teacherId) + ' · Zibil qutusuna köçürüldü' + (has ? ' (nəticələri ilə birlikdə)' : ''));
+  if (ex.teacherId !== u.id && findUser_(ex.teacherId)) notify_([ex.teacherId], 'exam', '«' + ex.title + '» imtahanı silindi.', 'exams', '');
+  return {};
+}
+
+function examNewLinks_(u, req) {
+  var ex = mustExam_(req.id);
+  needExam_(u, ex, 'manage');
+  var keys = {}; idList_(ex.studentIds).forEach(function (id) { keys[id] = examKey_(); });
+  update_('Exams', ex, { token: Utilities.getUuid().replace(/-/g, '').slice(0, 24), keys: JSON.stringify(keys), updatedAt: now_() });
+  log_(u, 'exam', 'İmtahan linklərini yenilədi', '«' + ex.title + '» · köhnə linklər artıq işləmir');
+  return {};
+}
+
+// İmtahan həmişəlik silinəndə onun bütün cəhdləri də silinir
+function examPurgeResults_(examIds) {
+  var set = {}; examIds.forEach(function (id) { set[id] = true; });
+  var rows = examIndex_().filter(function (x) { return set[x.examId]; });
+  if (rows.length) removeRows_('ExamResults', rows.map(function (x) { return x._row; }));
+  return rows.length;
+}
+
+// «Məlumatların yoxlanışı» üçün
+function examCheck_(issues, sIds) {
+  var exams = rows_('Exams');
+  if (!exams.length) return;
+  var uIds = {}; rows_('Users').forEach(function (x) { uIds[x.id] = true; });
+  exams.forEach(function (e) {
+    if (!uIds[e.teacherId]) issues.push({ type: 'warn', text: '«' + e.title + '» imtahanının müəllimi silinib.' });
+    var gone = idList_(e.studentIds).filter(function (id) { return !sIds[id]; }).length;
+    if (gone) issues.push({ type: 'info', text: '«' + e.title + '» imtahanında silinmiş tələbə var (' + gone + ').' });
+  });
+  var rev = examIndex_().filter(function (x) { return x.status === 'review'; }).length;
+  if (rev) issues.push({ type: 'info', text: rev + ' imtahan cavabı müəllimin yoxlamasını gözləyir (açıq suallar).' });
+}
+
+// ---- cəhdin tam görünüşü (müəllim və tələbə/valideyn üçün) ----
+function resultView_(ex, qs, a, staff) {
+  var ans = bigGet_(a, 'answers', {}) || {}, grades = parseJson_(a.grades, {}) || {};
+  var reveal = staff || isTrue_(ex.reveal);
+  var counts = { ok: 0, bad: 0, empty: 0, open: 0 };
+  var fin = a.status !== 'started';
+  var items = qs.map(function (q, i) {
+    var v = ans[i];
+    if (q.t === 't') {
+      var chosen = v === undefined || v === null || v === '' ? null : Number(v);
+      var ok = chosen === null ? null : chosen === q.c;
+      if (ok === null) counts.empty++; else if (ok) counts.ok++; else counts.bad++;
+      return { t: 't', q: q.q, p: q.p, o: q.o, chosen: chosen, ok: ok, correct: (reveal || ok) ? q.c : null, got: ok ? q.p : 0 };
+    }
+    var text = typeof v === 'string' ? v : '';
+    var graded = grades[i] !== undefined && grades[i] !== null && grades[i] !== '';
+    if (!text.trim()) counts.empty++; else counts.open++;
+    return { t: 'o', q: q.q, p: q.p, answer: text, got: !text.trim() ? 0 : (graded ? num_(grades[i]) : null),
+      model: (staff || (reveal && a.status === 'done')) ? q.a : '' };
+  });
+  var light = attemptLight_(a, ex, studentName_);
+  delete light.marks;
+  light.teacherName = userName_(ex.teacherId);
+  light.autoScore = num_(a.autoScore); light.openScore = num_(a.openScore);
+  light.comment = a.comment || ''; light.gradedAt = a.gradedAt || '';
+  light.counts = counts; light.items = items; light.reveal = isTrue_(ex.reveal);
+  light.strict = isTrue_(ex.strict); light.warnLimit = EXAM_WARN_LIMIT;
+  if (staff) { light.vlog = parseJson_(a.vlog, []); light.gradedBy = a.gradedBy ? userName_(a.gradedBy) : ''; light.examDeleted = !!ex.deletedAt; }
+  return light;
+}
+
+function examAttempt_(u, req) {
+  var a = attemptFull_(req.id);
+  if (!a) throw fail_('Nəticə tapılmadı. Səhifəni yeniləyin.', 'NOTFOUND');
+  var ex = examAny_(a.examId);
+  if (!ex) throw fail_('Bu nəticənin imtahanı silinib.', 'NOTFOUND');
+  // imtahanın sahibi və «bax» icazəsi olanlar; tələbə kartından — «tələbələrə bax» icazəsi ilə
+  if (!examAccess_(u, ex, 'view') && !can_(u, 'students.view')) throw fail_('Bu nəticəyə baxmaq üçün icazəniz yoxdur.', 'PERM');
+  if (a.status === 'started' && req._at > num_(a.deadline) + 60000) { finalize_(ex, examQuestionsOf_(ex), a, null, 'time', req._at, ''); a = attemptFull_(req.id); }
+  var s = findStudent_(a.studentId);
+  var view = resultView_(ex, examQuestionsOf_(ex), a, true);
+  view.canGrade = !u._readOnly && examAccess_(u, ex, 'manage') && a.status !== 'started';
+  view.canDelete = !u._readOnly && can_(u, 'exams.delete');
+  if (s && can_(u, 'students.view')) { view.phone = s.phone; view.parentPhone = s.parentPhone; view.parentName = s.parentName; }
+  if (ex.teacherId !== u.id) log_(u, 'view', 'İmtahan nəticəsinə baxdı', '«' + ex.title + '» · Tələbə: ' + (s ? s.name : '(silinmiş tələbə)'));
+  return { attempt: view };
+}
+
+function gradeAttempt_(u, req) {
+  var a = attemptFull_(req.id);
+  if (!a) throw fail_('Nəticə tapılmadı. Səhifəni yeniləyin.', 'NOTFOUND');
+  var ex = examAny_(a.examId);
+  if (!ex || ex.deletedAt) throw fail_('Bu nəticənin imtahanı silinib.', 'NOTFOUND');
+  needExam_(u, ex, 'manage');
+  if (a.status === 'started') throw fail_('Bu cəhd hələ davam edir.');
+  var qs = examQuestionsOf_(ex), ans = bigGet_(a, 'answers', {}) || {}, grades = parseJson_(a.grades, {}) || {};
+  var inG = req.grades && typeof req.grades === 'object' ? req.grades : {};
+  var marks = String(a.marks || '').split(''), openScore = 0, pending = 0;
+  qs.forEach(function (q, i) {
+    if (q.t !== 'o') return;
+    var has = typeof ans[i] === 'string' && ans[i].trim();
+    if (!has) { marks[i] = 'e'; delete grades[i]; return; }
+    if (inG[i] !== undefined && inG[i] !== null && inG[i] !== '') {
+      var g = pts_(inG[i]);
+      if (!(g >= 0 && g <= q.p)) throw fail_('Sual ' + (i + 1) + ': bal 0–' + q.p + ' aralığında olmalıdır.');
+      grades[i] = g;
+    }
+    if (grades[i] === undefined || grades[i] === null || grades[i] === '') { marks[i] = 'p'; pending++; }
+    else { marks[i] = 'g'; openScore += num_(grades[i]); }
+  });
+  openScore = Math.round(openScore * 100) / 100;
+  var score = Math.round((num_(a.autoScore) + openScore) * 100) / 100;
+  var ch = { status: pending ? 'review' : 'done', openScore: String(openScore), score: String(score), openPending: String(pending), marks: marks.join(''),
+    gradedBy: u.id, gradedAt: now_(), grades: JSON.stringify(grades) };
+  if (req.comment !== undefined) ch.comment = str_(req.comment, 600);
+  resPatch_(a, ch);
+  log_(u, 'exam', 'Açıq cavabları yoxladı', '«' + ex.title + '» · Tələbə: ' + studentName_(a.studentId) + ' · Yekun: ' + score + '/' + a.maxPoints + (pending ? ' · yoxlanılmamış: ' + pending : ''));
+  if (ex.teacherId !== u.id && findUser_(ex.teacherId)) notify_([ex.teacherId], 'exam', u.name + ' «' + ex.title + '» imtahanında ' + studentName_(a.studentId) + ' adlı tələbənin cavablarını yoxladı.', 'exams', ex.id);
+  var view = resultView_(ex, qs, attemptFull_(a.id), true);
+  view.canGrade = true; view.canDelete = can_(u, 'exams.delete');
+  return { attempt: view };
+}
+
+function deleteAttempt_(u, req) {
+  need_(u, 'exams.delete');
+  var a = attemptFull_(req.id);
+  if (!a) throw fail_('Nəticə tapılmadı. Səhifəni yeniləyin.', 'NOTFOUND');
+  var ex = examAny_(a.examId);
+  removeRows_('ExamResults', [a._row]);
+  var cache = CacheService.getScriptCache(); cache.remove('xa_' + a.id); cache.remove('xd_' + a.id);
+  if (ex && isTrue_(ex.locked) && !examHasAttempts_(ex.id)) update_('Exams', ex, { locked: 'false' });
+  log_(u, 'exam', 'İmtahan cəhdini sildi', '«' + (ex ? ex.title : '(silinmiş imtahan)') + '» · Tələbə: ' + studentName_(a.studentId) + ' · ' + (a.status === 'started' ? 'davam edən cəhd' : 'Nəticə: ' + a.score + '/' + a.maxPoints) + ' · Tarix: ' + a.startedAt);
+  if (ex && ex.teacherId !== u.id && findUser_(ex.teacherId)) notify_([ex.teacherId], 'exam', u.name + ' «' + ex.title + '» imtahanında ' + studentName_(a.studentId) + ' adlı tələbənin cəhdini sildi.', 'exams', ex.id);
+  return {};
+}
+
+// ===================== İMTAHAN: TƏLƏBƏ SƏHİFƏSİ (girişsiz) =====================
+function examByLink_(link) {
+  link = String(link || '').slice(0, 80);
+  var bad = function () { return fail_('İmtahan tapılmadı. Link yanlışdır və ya artıq etibarsızdır.', 'NOTFOUND'); };
+  var list = rows_('Exams');
+  var m = link.match(/^([A-Za-z0-9]+)\.([A-Za-z0-9]+)$/);
+  if (m) {
+    var ex = list.filter(function (x) { return x.id === m[1]; })[0];
+    if (!ex) throw bad();
+    var keys = parseJson_(ex.keys, {}), sid = '';
+    Object.keys(keys).forEach(function (k) { if (keys[k] === m[2]) sid = k; });
+    if (!sid || idList_(ex.studentIds).indexOf(sid) === -1) throw bad();
+    return { ex: ex, studentId: sid };
+  }
+  if (!/^[A-Za-z0-9]{12,}$/.test(link)) throw bad();
+  var e2 = list.filter(function (x) { return x.token && x.token === link; })[0];
+  if (!e2) throw bad();
+  return { ex: e2, studentId: '' };
+}
+function examPublic_(ex) {
+  return { title: ex.title, subject: ex.subject, note: ex.note, teacherName: userName_(ex.teacherId), duration: num_(ex.duration),
+    qCount: num_(ex.qCount), openCount: num_(ex.openCount), maxPoints: num_(ex.maxPoints), passMin: num_(ex.passMin),
+    strict: isTrue_(ex.strict), stopOnLimit: isTrue_(ex.stopOnLimit), warnLimit: EXAM_WARN_LIMIT };
+}
+
+function xInfo_(req) {
+  var r = examByLink_(req.link), ex = r.ex;
+  var out = { state: isTrue_(ex.active) ? 'open' : 'closed', exam: examPublic_(ex) };
+  if (r.studentId) {
+    var s = findStudent_(r.studentId);
+    if (!s) throw fail_('İmtahan tapılmadı. Link yanlışdır və ya artıq etibarsızdır.', 'NOTFOUND');
+    out.student = { id: s.id, name: s.name };
+    var run = examIndex_().filter(function (x) { return x.examId === ex.id && x.studentId === s.id && x.status === 'started'; })[0];
+    if (run) { var a = fullRowAt_('ExamResults', run._row); if (a.id === run.id && req._at <= num_(a.deadline)) { out.state = 'open'; out.running = Math.max(0, Math.round((num_(a.deadline) - req._at) / 1000)); } }
+  } else {
+    var sMap = {}; rows_('Students').forEach(function (x) { sMap[x.id] = x; });
+    out.students = idList_(ex.studentIds).filter(function (id) { return sMap[id]; }).map(function (id) { return { id: id, name: sMap[id].name }; })
+      .sort(function (a, b) { return a.name.localeCompare(b.name, 'az'); });
+  }
+  return out;
+}
+
+function cleanAnswers_(raw, n) {
+  var out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  Object.keys(raw).slice(0, 400).forEach(function (k) {
+    var i = Number(k);
+    if (!(i >= 0 && i < n) || Math.floor(i) !== i) return;
+    var v = raw[k];
+    if (typeof v === 'number' && isFinite(v) && v >= 0 && v < 20) out[i] = Math.floor(v);
+    else if (typeof v === 'string') { var s = v.replace(/\r/g, '').slice(0, 3000); if (s.trim()) out[i] = s; }
+  });
+  return out;
+}
+function draftOf_(a) {    // son saxlanılmış qaralama: keş (daha təzə), yoxdursa cədvəl
+  var c = parseJson_(CacheService.getScriptCache().get('xd_' + a.id), null);
+  if (c && c.a && typeof c.a === 'object') return c.a;
+  var s = bigGet_(a, 'answers', null);
+  return s && typeof s === 'object' ? s : null;
+}
+function attemptForStudent_(ex, qs, a, resumed) {
+  var conf = parseJson_(a.conf, {}) || {};
+  var order = Array.isArray(conf.o) && conf.o.length === qs.length ? conf.o : range_(qs.length);
+  var list = order.map(function (i) {
+    var q = qs[i], o = { i: i, t: q.t, q: q.q, p: q.p };
+    if (q.t === 't') {
+      var perm = conf.p && Array.isArray(conf.p[i]) && conf.p[i].length === q.o.length ? conf.p[i] : range_(q.o.length);
+      o.o = perm.map(function (k) { return { v: k, x: q.o[k] }; });
+    }
+    return o;
+  });
+  var s = findStudent_(a.studentId);
+  return { state: 'running',
+    attempt: { id: a.id, left: Math.max(0, Math.round((num_(a.deadline) - Date.now()) / 1000)), duration: num_(a.dur), violations: num_(a.violations), resumed: !!resumed },
+    exam: examPublic_(ex), student: { name: s ? s.name : '' }, questions: list, answers: (resumed ? draftOf_(a) : null) || {} };
+}
+
+function xStart_(req) {
+  var r = examByLink_(req.link), ex = r.ex;
+  var sid = r.studentId || String(req.studentId || '');
+  if (!sid || idList_(ex.studentIds).indexOf(sid) === -1) throw fail_('Siyahıdan öz adınızı seçin.');
+  var s = findStudent_(sid);
+  if (!s) throw fail_('Tələbə tapılmadı. Müəlliminizə müraciət edin.', 'NOTFOUND');
+  var at = req._at;
+  var mine = examIndex_().filter(function (x) { return x.examId === ex.id && x.studentId === sid; });
+  var run = mine.filter(function (x) { return x.status === 'started'; })[0];
+  var qs = examQuestionsOf_(ex);
+  if (run) {
+    var a = fullRowAt_('ExamResults', run._row);
+    if (at <= num_(a.deadline) + EXAM_GRACE_SEC * 1000) return attemptForStudent_(ex, qs, a, true);   // davam edən cəhd — eyni vaxtla davam
+    finalize_(ex, qs, a, null, 'time', at, '');
+    return { state: 'finished', resultId: a.id };
+  }
+  if (!isTrue_(ex.active)) return { state: 'closed', exam: examPublic_(ex) };
+  if (!req.accept) throw fail_('İmtahana başlamaq üçün qaydaları qəbul edin.');
+  if (!qs.length) throw fail_('Bu imtahanda sual yoxdur. Müəlliminizə müraciət edin.');
+  if (mine.length >= EXAM_MAX_ATTEMPTS) throw fail_('Bu imtahan üçün cəhd limiti (' + EXAM_MAX_ATTEMPTS + ') bitib. Müəlliminizə müraciət edin.');
+  var dur = num_(ex.duration) || 30, conf = {};
+  if (isTrue_(ex.shuffle)) {
+    conf.o = shuffle_(range_(qs.length)); conf.p = {};
+    qs.forEach(function (q, i) { if (q.t === 't') conf.p[i] = shuffle_(range_(q.o.length)); });
+  }
+  var row = { id: 'R' + Utilities.getUuid().replace(/-/g, ''), examId: ex.id, status: 'started', studentId: sid, startedAt: msToStamp_(at), dur: String(dur),
+    deadline: String(at + dur * 60000), finishedAt: '', spent: '', autoScore: '', openScore: '', score: '', maxPoints: ex.maxPoints, passMin: ex.passMin,
+    openPending: '', violations: '0', endReason: '', late: '', marks: '', gradedBy: '', gradedAt: '', savedAt: '',
+    comment: '', conf: JSON.stringify(conf), vlog: '[]', grades: '', answers: '', answers2: '', answers3: '' };
+  insertMany_('ExamResults', [row]);
+  if (!isTrue_(ex.locked)) update_('Exams', ex, { locked: 'true' });
+  CacheService.getScriptCache().put('xa_' + row.id, JSON.stringify({ e: ex.id, d: at + dur * 60000, n: qs.length, s: 'started', p: at }), 21600);
+  log_({ id: '', name: s.name, role: 'student' }, 'exam', 'İmtahana başladı', '«' + ex.title + '» · Müəllim: ' + userName_(ex.teacherId) + ' · Cəhd № ' + (mine.length + 1));
+  return attemptForStudent_(ex, qs, row, false);
+}
+
+function attemptMeta_(id) {
+  var cache = CacheService.getScriptCache();
+  var m = parseJson_(cache.get('xa_' + id), null);
+  if (m && m.d) return m;
+  var a = attemptFull_(id);
+  if (!a) return null;
+  var ex = examAny_(a.examId);
+  m = { e: a.examId, d: num_(a.deadline), n: ex ? (num_(ex.qCount) || EXAM_MAX_Q) : EXAM_MAX_Q, s: a.status, p: 0 };
+  if (a.status === 'started') cache.put('xa_' + id, JSON.stringify(m), 21600);
+  return m;
+}
+
+// Avtomatik yadda saxlama: keşə (kilidsiz, sürətli), vaxtaşırı cədvələ. Qalan vaxt serverdən qayıdır.
+function xSave_(req) {
+  var id = String(req.id || '').slice(0, 60), at = req._at;
+  var meta = attemptMeta_(id);
+  if (!meta) throw fail_('İmtahan cəhdi tapılmadı.', 'NOTFOUND');
+  if (meta.s !== 'started') return { state: 'finished', resultId: id };
+  if (at > meta.d + EXAM_GRACE_SEC * 1000) return { state: 'time' };
+  var ans = cleanAnswers_(req.answers, meta.n);
+  var json = JSON.stringify({ t: at, a: ans });
+  var cache = CacheService.getScriptCache(), cached = false;
+  if (json.length < 90000) { cache.put('xd_' + id, json, 21600); cached = true; }
+  if (!cached || at - (meta.p || 0) > EXAM_PERSIST_SEC * 1000) {
+    var still = true;
+    withLock_(function () {
+      examFresh_();
+      var a = attemptFull_(id);
+      if (!a || a.status !== 'started') { still = false; return; }
+      var ch = answersPut_(ans); ch.savedAt = now_();
+      setCells_('ExamResults', a._row, ch);
+    });
+    if (!still) { cache.remove('xa_' + id); return { state: 'finished', resultId: id }; }
+    meta.p = at; cache.put('xa_' + id, JSON.stringify(meta), 21600);
+  }
+  return { state: 'ok', left: Math.max(0, Math.round((meta.d - Date.now()) / 1000)) };
+}
+
+function gradeAuto_(qs, ans) {
+  var auto = 0, marks = '', pending = 0;
+  qs.forEach(function (q, i) {
+    var v = ans[i];
+    if (q.t === 't') {
+      if (v === undefined || v === null || v === '') marks += '-';
+      else if (Number(v) === q.c) { marks += '1'; auto += q.p; }
+      else marks += '0';
+    } else if (typeof v === 'string' && v.trim()) { marks += 'p'; pending++; }
+    else marks += 'e';
+  });
+  return { auto: Math.round(auto * 100) / 100, marks: marks, pending: pending };
+}
+
+/** Cəhdi bağlayır: testlər avtomatik yoxlanılır, açıq cavablar müəllimi gözləyir. answers == null → son qaralama. */
+function finalize_(ex, qs, a, answers, reason, at, lateMin) {
+  var ans = answers || draftOf_(a) || {};
+  var g = gradeAuto_(qs, ans);
+  var dl = num_(a.deadline), startMs = dl - num_(a.dur) * 60000;
+  var endMs = Math.max(startMs, Math.min(at, dl));
+  var ch = answersPut_(ans);
+  ch.status = g.pending ? 'review' : 'done';
+  ch.finishedAt = msToStamp_(endMs);
+  ch.spent = String(Math.max(0, Math.round((endMs - startMs) / 1000)));
+  ch.autoScore = String(g.auto); ch.openScore = '0'; ch.score = String(g.auto);
+  ch.openPending = String(g.pending); ch.endReason = reason; ch.late = lateMin || ''; ch.marks = g.marks; ch.savedAt = now_();
+  resPatch_(a, ch);
+  var cache = CacheService.getScriptCache(); cache.remove('xa_' + a.id); cache.remove('xd_' + a.id);
+  var s = findStudent_(a.studentId), name = s ? s.name : '(silinmiş tələbə)';
+  var res = g.auto + '/' + a.maxPoints + ' (' + pct_(g.auto, a.maxPoints) + '%)';
+  log_({ id: '', name: name, role: 'student' }, 'exam', reason === 'violations' ? 'İmtahan qayda pozuntularına görə dayandırıldı' : 'İmtahanı bitirdi',
+    '«' + ex.title + '» · Nəticə: ' + res + (g.pending ? ' · yoxlanılacaq açıq cavab: ' + g.pending : '') + ' · Səbəb: ' + (EXAM_END[reason] || reason) +
+    (num_(a.violations) ? ' · Xəbərdarlıq sayı: ' + a.violations : '') + (lateMin ? ' · cavablar ' + lateMin + ' dəq gec göndərilib' : ''));
+  examNotify_(ex, name + ' «' + ex.title + '» imtahanını bitirdi: ' + res + (g.pending ? ' — açıq cavablar yoxlanılmalıdır' : '') + (reason === 'violations' ? ' (qayda pozuntularına görə dayandırıldı)' : ''));
+}
+// Müəllimə bildiriş: oxunmamış bildiriş varsa, yenisi yaradılmır — sayğac artır
+function examNotify_(ex, text) {
+  var uid = ex.teacherId;
+  if (!uid || !findUser_(uid)) return;
+  var open = rawRows_('Notifs').filter(function (n) { return n.userId === uid && n.type === 'exam' && n.param === ex.id && !n.readAt; })[0];
+  if (!open) { notify_([uid], 'exam', text, 'exams', ex.id); return; }
+  var m = String(open.text).match(/^(\d+) yeni nəticə/);
+  update_('Notifs', open, { text: (m ? Number(m[1]) + 1 : 2) + ' yeni nəticə: «' + ex.title + '»', createdAt: now_() });
+}
+
+// Vaxtı bitmiş, amma bağlanmamış cəhdləri bağlayır (kilid daxilində çağırılır)
+function examCloseExpired_(examId) {
+  var started = examIndex_().filter(function (x) { return x.status === 'started' && (!examId || x.examId === examId); });
+  var n = 0, now = Date.now();
+  started.forEach(function (ent) {
+    var a = fullRowAt_('ExamResults', ent._row);
+    if (a.id !== ent.id || a.status !== 'started') return;
+    if (now <= num_(a.deadline) + 60000) return;
+    var ex = examAny_(a.examId);
+    if (!ex) { resPatch_(a, { status: 'done', endReason: 'time', finishedAt: msToStamp_(num_(a.deadline)) }); return; }
+    finalize_(ex, examQuestionsOf_(ex), a, null, 'time', now, '');
+    n++;
+  });
+  return n;
+}
+
+// Qayda pozuntusu (başqa pəncərəyə keçid, kopyalama və s.). Limit keçiləndə imtahan dərhal bağlanır.
+function xEvent_(req) {
+  var a = attemptFull_(String(req.id || '').slice(0, 60));
+  if (!a) throw fail_('İmtahan cəhdi tapılmadı.', 'NOTFOUND');
+  if (a.status !== 'started') return { state: 'finished', resultId: a.id };
+  var ex = examAny_(a.examId);
+  if (!ex) throw fail_('İmtahan tapılmadı.', 'NOTFOUND');
+  var qs = examQuestionsOf_(ex), at = req._at;
+  var ans = req.answers ? cleanAnswers_(req.answers, qs.length) : null;
+  if (at > num_(a.deadline) + EXAM_GRACE_SEC * 1000) { finalize_(ex, qs, a, null, 'time', at, ''); return { state: 'finished', resultId: a.id }; }
+  if (!isTrue_(ex.strict)) return { state: 'ok', violations: 0, limit: EXAM_WARN_LIMIT };
+  var kind = EXAM_VKINDS[req.kind] ? String(req.kind) : 'other';
+  var vlog = parseJson_(a.vlog, []) || [];
+  if (vlog.length < 80) vlog.push([msToStamp_(at).slice(11), kind]);
+  var n = num_(a.violations) + 1;
+  var ch = { violations: String(n), vlog: JSON.stringify(vlog) };
+  if (ans) { var big = answersPut_(ans); Object.keys(big).forEach(function (k) { ch[k] = big[k]; }); ch.savedAt = now_();
+    var json = JSON.stringify({ t: at, a: ans }); if (json.length < 90000) CacheService.getScriptCache().put('xd_' + a.id, json, 21600); }
+  resPatch_(a, ch);
+  if (isTrue_(ex.stopOnLimit) && n > EXAM_WARN_LIMIT) {
+    finalize_(ex, qs, a, ans, 'violations', at, '');
+    return { state: 'finished', resultId: a.id, violations: n };
+  }
+  return { state: 'ok', violations: n, limit: EXAM_WARN_LIMIT, left: Math.max(0, Math.round((num_(a.deadline) - Date.now()) / 1000)) };
+}
+
+function xSubmit_(req) {
+  var a = attemptFull_(String(req.id || '').slice(0, 60));
+  if (!a) throw fail_('İmtahan cəhdi tapılmadı.', 'NOTFOUND');
+  if (a.status !== 'started') return { state: 'finished', resultId: a.id };
+  var ex = examAny_(a.examId);
+  if (!ex) throw fail_('İmtahan tapılmadı.', 'NOTFOUND');
+  var qs = examQuestionsOf_(ex), at = req._at, dl = num_(a.deadline);
+  var ans = cleanAnswers_(req.answers, qs.length), reason = 'submit', lateMin = '';
+  if (at > dl + EXAM_GRACE_SEC * 1000) {
+    // vaxt bitəndən sonra gələn cavab: vaxtında saxlanılmış qaralama varsa — o sayılır
+    reason = 'time';
+    var d = draftOf_(a);
+    if (d) ans = d; else lateMin = String(Math.max(1, Math.round((at - dl) / 60000)));
+  } else if (req.reason === 'time') reason = 'time';
+  else if (req.reason === 'violations' && isTrue_(ex.strict) && isTrue_(ex.stopOnLimit)) {
+    reason = 'violations';
+    var v = Math.min(99, Math.floor(Number(req.violations) || 0));
+    if (v > num_(a.violations)) resPatch_(a, { violations: String(Math.max(v, EXAM_WARN_LIMIT + 1)) });
+  }
+  finalize_(ex, qs, a, ans, reason, at, lateMin);
+  return { state: 'finished', resultId: a.id };
+}
+
+// Nəticə səhifəsi (tələbə və valideyn üçün; link yalnız cəhdin təsadüfi nömrəsini bilənə açılır)
+function xResult_(req) {
+  var id = String(req.id || '').slice(0, 60);
+  var bad = function () { return fail_('Nəticə tapılmadı. Link yanlışdır.', 'NOTFOUND'); };
+  if (!/^R[a-f0-9]{32}$/.test(id)) throw bad();
+  var a = attemptFull_(id);
+  if (!a) throw bad();
+  var ex = examAny_(a.examId);
+  if (!ex) throw bad();
+  if (a.status === 'started') {
+    if (req._at <= num_(a.deadline) + EXAM_GRACE_SEC * 1000) return { state: 'running' };
+    withLock_(function () {
+      examFresh_();
+      var b = attemptFull_(id);
+      if (b && b.status === 'started') { var e2 = examAny_(b.examId); if (e2) finalize_(e2, examQuestionsOf_(e2), b, null, 'time', req._at, ''); }
+    });
+    examFresh_();
+    a = attemptFull_(id); ex = examAny_(a.examId);
+    if (!a || !ex || a.status === 'started') throw bad();
+  }
+  return { state: 'done', result: resultView_(ex, examQuestionsOf_(ex), a, false) };
+}
+
+// ---- test məlumatları üçün nümunə imtahan (yalnız developer generatoru) ----
+var TEST_EXAM_Q = [
+  { t: 't', q: '12 × 8 neçədir?', o: ['86', '96', '108', '92'], c: 1, p: 2 },
+  { t: 't', q: 'Azərbaycanın paytaxtı hansı şəhərdir?', o: ['Gəncə', 'Sumqayıt', 'Bakı', 'Şəki'], c: 2, p: 2 },
+  { t: 't', q: '«Book» sözünün tərcüməsi hansıdır?', o: ['Dəftər', 'Kitab', 'Qələm'], c: 1, p: 2 },
+  { t: 't', q: 'Suyun kimyəvi formulu hansıdır?', o: ['CO2', 'O2', 'H2O', 'NaCl'], c: 2, p: 2 },
+  { t: 't', q: 'Bir saatda neçə dəqiqə var?', o: ['30', '60', '90', '100'], c: 1, p: 2 },
+  { t: 'o', q: 'Bu ay keçdiyiniz mövzulardan birini qısa izah edin.', a: 'Mövzunun adı və 2–3 cümləlik izahı.', p: 5 }
+];
+function examTestRows_(teacherId, studentIds, creatorId, stamp, n) {
+  var keys = {}; studentIds.forEach(function (id) { keys[id] = examKey_(); });
+  var max = TEST_EXAM_Q.reduce(function (s, q) { return s + q.p; }, 0);
+  var ex = { id: newId_('E'), token: Utilities.getUuid().replace(/-/g, '').slice(0, 24), title: 'Test imtahanı ' + n, subject: pick_(TEST_SUBJECTS), note: '',
+    teacherId: teacherId, studentIds: studentIds.join(','), keys: JSON.stringify(keys), duration: '30', points: '2', passMin: '8', maxPoints: String(max),
+    qCount: String(TEST_EXAM_Q.length), openCount: '1', strict: 'true', stopOnLimit: 'true', shuffle: 'false', reveal: 'true', active: 'true', locked: 'false',
+    createdBy: creatorId, createdAt: stamp, updatedAt: '', deletedAt: '', deletedBy: '', isTest: 'true' };
+  var big = bigPut_('questions', TEST_EXAM_Q); Object.keys(big).forEach(function (k) { ex[k] = big[k]; });
+  var results = [];
+  studentIds.forEach(function (sid, i) {
+    if (i % 4 === 3) return;                                   // bəziləri hələ başlamayıb
+    var ans = {}; TEST_EXAM_Q.forEach(function (q, k) { if (q.t === 't') { if (Math.random() < 0.9) ans[k] = Math.random() < 0.7 ? q.c : Math.floor(Math.random() * q.o.length); } else if (Math.random() < 0.8) ans[k] = 'Test cavabı: mövzunu öz sözlərimlə izah edirəm.'; });
+    var g = gradeAuto_(TEST_EXAM_Q, ans), dur = 30, startMs = Date.now() - (i + 1) * 3600e3, spent = 600 + Math.floor(Math.random() * 1000);
+    var stopped = i % 7 === 5;
+    var row = { id: 'R' + Utilities.getUuid().replace(/-/g, ''), examId: ex.id, status: g.pending ? 'review' : 'done', studentId: sid, startedAt: msToStamp_(startMs), dur: String(dur),
+      deadline: String(startMs + dur * 60000), finishedAt: msToStamp_(startMs + spent * 1000), spent: String(spent), autoScore: String(g.auto), openScore: '0', score: String(g.auto),
+      maxPoints: String(max), passMin: '8', openPending: String(g.pending), violations: stopped ? '4' : String(i % 3), endReason: stopped ? 'violations' : 'submit', late: '', marks: g.marks,
+      gradedBy: '', gradedAt: '', savedAt: stamp, comment: '', conf: '{}', vlog: stopped ? '[["12:01:10","leave"],["12:03:42","copy"],["12:05:03","leave"],["12:06:30","leave"]]' : '[]', grades: '' };
+    var b = bigPut_('answers', ans); Object.keys(b).forEach(function (k) { row[k] = b[k]; });
+    results.push(row);
+  });
+  if (results.length) ex.locked = 'true';
+  return { exam: ex, results: results };
 }
